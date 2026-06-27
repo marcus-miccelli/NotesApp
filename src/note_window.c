@@ -226,9 +226,12 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (GetKeyState(VK_SHIFT) & 0x8000) {
                     if (MessageBoxW(hwnd, L"Delete this note permanently?",
                                     L"Delete", MB_YESNO|MB_ICONWARNING) == IDYES) {
+                        /* Capture app before DestroyWindow: WM_DESTROY frees
+                         * nw synchronously, so nw->app must not be read after. */
                         char id[16]; strcpy(id, nw->id);
+                        AppState* app = nw->app;
                         DestroyWindow(hwnd);
-                        app_delete_note(nw->app, id);
+                        app_delete_note(app, id);
                         return 0;
                     }
                 } else {
