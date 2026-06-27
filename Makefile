@@ -2,6 +2,15 @@ CC      := gcc
 CFLAGS  := -std=c11 -Wall -Wextra -O2 -Isrc -Ithird_party/md4c -Ithird_party/cjson
 LDLIBS  := -lgdi32 -lcomctl32 -lole32 -lshell32
 
+# Build-temp fix: cc1/collect2 need a writable temp dir, obtained via the
+# Windows GetTempPath env vars (TMP/TEMP). GNU Make scrubs these from recipe
+# environments, and some shells default them to an unwritable location, so pin
+# a repo-local temp dir for every recipe. Created at parse time below.
+BUILD_TMP   := .build-tmp
+export TMP  := $(BUILD_TMP)
+export TEMP := $(BUILD_TMP)
+$(shell mkdir -p $(BUILD_TMP))
+
 # GUI app sources (added to as tasks land)
 APP_SRC := src/main.c
 APP_OBJ := $(APP_SRC:.c=.o)
