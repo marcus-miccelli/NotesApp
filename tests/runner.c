@@ -9,12 +9,14 @@ void test_smoke(void);
 void test_paths(void);
 void test_store(void);
 void test_prefs(void);
+void test_markdown(void);
 
 int main(void) {
     test_smoke();
     test_paths();
     test_store();
     test_prefs();
+    test_markdown();
     printf("\n%d checks, %d failed\n", g_tests_run, g_tests_failed);
     return g_tests_failed == 0 ? 0 : 1;
 }
