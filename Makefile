@@ -12,7 +12,7 @@ export TEMP := $(BUILD_TMP)
 $(shell mkdir -p $(BUILD_TMP))
 
 # GUI app sources (added to as tasks land)
-APP_SRC := src/main.c src/note_window.c
+APP_SRC := src/main.c src/note_window.c src/tray.c
 APP_OBJ := $(APP_SRC:.c=.o)
 
 # Pure-logic sources compiled into the test binary (added to as tasks land)
