@@ -260,6 +260,12 @@ HWND note_window_open(AppState* app, NoteMeta* meta) {
 
 void note_window_close(HWND hwnd) {
     NoteWin* nw = nw_get(hwnd);
-    if (nw) { nw_save_content(nw); nw->meta->open = false; }
+    if (nw) {
+        RECT wr; GetWindowRect(hwnd, &wr);
+        nw->meta->x = wr.left; nw->meta->y = wr.top;
+        nw->meta->w = wr.right - wr.left; nw->meta->h = wr.bottom - wr.top;
+        nw_save_content(nw);
+        nw->meta->open = false;
+    }
     DestroyWindow(hwnd);
 }
