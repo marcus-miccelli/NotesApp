@@ -56,6 +56,76 @@ static void nw_save_content(NoteWin* nw) {
     free(buf);
 }
 
+/*
+ * nw_set_range_fmt / nw_apply_format — live markdown styling on each debounce tick.
+ *
+ * CRLF/offset note: GetWindowTextA returns \r\n (2 bytes per line break), but
+ * RichEdit's internal character positions (used by EM_EXSETSEL / CHARRANGE) count
+ * each paragraph break as a SINGLE character.  Feeding a \r\n buffer to
+ * markdown_spans would produce byte offsets that drift +1 per preceding line break,
+ * causing formatting to land on wrong characters for multi-line notes.
+ *
+ * Fix (option b — clean): nw_apply_format uses EM_GETTEXTEX with GT_DEFAULT and
+ * CP_ACP, which returns the text with \r-only paragraph separators (matching
+ * RichEdit's internal indexing).  The resulting byte offsets from markdown_spans
+ * are correct for EM_EXSETSEL.  nw_save_content is unaffected — it still uses
+ * GetWindowTextA whose \r\n output is correct for .md files on Windows.
+ *
+ * md4c treats bare \r as a valid line ending (CommonMark §2.3), so parsing is
+ * unaffected.
+ */
+static void nw_set_range_fmt(HWND edit, size_t start, size_t len, MdFmt fmt) {
+    CHARRANGE saved; SendMessageW(edit, EM_EXGETSEL, 0, (LPARAM)&saved);
+    CHARRANGE r; r.cpMin = (LONG)start; r.cpMax = (LONG)(start + len);
+    SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&r);
+
+    CHARFORMAT2W cf; memset(&cf, 0, sizeof cf); cf.cbSize = sizeof cf;
+    cf.dwMask = CFM_BOLD | CFM_ITALIC | CFM_SIZE | CFM_FACE | CFM_COLOR;
+    cf.crTextColor = COL_TEXT;
+    cf.yHeight = 200;                       /* 10pt default (twips) */
+    if (fmt & MD_FMT_H1) cf.yHeight = 360;
+    else if (fmt & MD_FMT_H2) cf.yHeight = 300;
+    else if (fmt & MD_FMT_H3) cf.yHeight = 260;
+    if (fmt & (MD_FMT_BOLD | MD_FMT_H1 | MD_FMT_H2 | MD_FMT_H3))
+        cf.dwEffects |= CFE_BOLD;
+    if (fmt & MD_FMT_ITALIC) cf.dwEffects |= CFE_ITALIC;
+    if (fmt & MD_FMT_CODE) wcscpy(cf.szFaceName, L"Consolas");
+    else wcscpy(cf.szFaceName, L"Segoe UI");
+    SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+
+    SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&saved);  /* restore caret */
+}
+
+static void nw_apply_format(NoteWin* nw) {
+    /* Use EM_GETTEXTEX with GT_DEFAULT + CP_ACP: returns \r-only line endings
+     * whose byte offsets match RichEdit's internal character positions exactly. */
+    GETTEXTLENGTHEX gtl; gtl.flags = GTL_DEFAULT; gtl.codepage = CP_ACP;
+    int len = (int)SendMessageW(nw->edit, EM_GETTEXTLENGTHEX, (WPARAM)&gtl, 0);
+    if (len <= 0) return;
+    char* buf = malloc((size_t)len + 1);
+    if (!buf) return;
+    GETTEXTEX gte; gte.cb = (DWORD)(len + 1); gte.flags = GT_DEFAULT;
+    gte.codepage = CP_ACP; gte.lpDefaultChar = NULL; gte.lpUsedDefChar = NULL;
+    SendMessageW(nw->edit, EM_GETTEXTEX, (WPARAM)&gte, (LPARAM)buf);
+
+    /* reset everything to default first */
+    CHARRANGE all = { 0, -1 };
+    SendMessageW(nw->edit, EM_EXSETSEL, 0, (LPARAM)&all);
+    CHARFORMAT2W base; memset(&base, 0, sizeof base); base.cbSize = sizeof base;
+    base.dwMask = CFM_BOLD|CFM_ITALIC|CFM_SIZE|CFM_FACE|CFM_COLOR;
+    base.yHeight = 200; base.crTextColor = COL_TEXT; wcscpy(base.szFaceName, L"Segoe UI");
+    CHARRANGE saved; SendMessageW(nw->edit, EM_EXGETSEL, 0, (LPARAM)&saved);
+    SendMessageW(nw->edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&base);
+    SendMessageW(nw->edit, EM_EXSETSEL, 0, (LPARAM)&saved);
+
+    MdSpan spans[256];
+    size_t n = markdown_spans(buf, (size_t)len, spans, 256);
+    if (n > 256) n = 256;
+    for (size_t i = 0; i < n; i++)
+        nw_set_range_fmt(nw->edit, spans[i].start, spans[i].len, spans[i].fmt);
+    free(buf);
+}
+
 static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     NoteWin* nw = nw_get(hwnd);
     switch (msg) {
@@ -142,8 +212,11 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == IDT_DEBOUNCE) {
             KillTimer(hwnd, IDT_DEBOUNCE);
+            SendMessageW(nw->edit, WM_SETREDRAW, FALSE, 0);
             nw_save_content(nw);
-            /* live formatting applied in Task 8 */
+            nw_apply_format(nw);
+            SendMessageW(nw->edit, WM_SETREDRAW, TRUE, 0);
+            InvalidateRect(nw->edit, NULL, TRUE);
         }
         return 0;
     case WM_DESTROY:
