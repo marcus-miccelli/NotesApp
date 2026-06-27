@@ -84,6 +84,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(hwnd, &ps);
+        if (!nw) { EndPaint(hwnd, &ps); return 0; }
         RECT rc; GetClientRect(hwnd, &rc);
         RECT title = { 0, 0, rc.right, TITLEBAR_H };
         FillRect(dc, &title, nw->title_brush);
@@ -127,6 +128,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     }
     case WM_EXITSIZEMOVE: {
+        if (!nw) return 0;
         RECT wr; GetWindowRect(hwnd, &wr);
         nw->meta->x = wr.left; nw->meta->y = wr.top;
         nw->meta->w = wr.right - wr.left; nw->meta->h = wr.bottom - wr.top;
