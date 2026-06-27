@@ -3,6 +3,7 @@
 #include "markdown.h"
 #include <windowsx.h>
 #include <richedit.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -20,7 +21,7 @@ static const COLORREF COL_TITLE  = RGB(0x2b, 0x3b, 0x55); /* "slate" accent */
 
 typedef struct {
     AppState* app;
-    NoteMeta* meta;
+    char id[16];               /* note id; resolve NoteMeta* fresh via nw_meta() */
     HWND edit;
     HBRUSH bg_brush;
     HBRUSH title_brush;
@@ -30,14 +31,57 @@ static HMODULE g_richedit = NULL;
 
 static NoteWin* nw_get(HWND h) { return (NoteWin*)GetWindowLongPtrW(h, GWLP_USERDATA); }
 
+/* Resolve the current NoteMeta* by id at point of use. The prefs.notes[] array
+ * can be realloc'd (add) or memmove'd (remove), so a cached NoteMeta* would
+ * dangle. Always resolve fresh and NULL-check (the note may have been deleted). */
+static NoteMeta* nw_meta(NoteWin* nw) { return prefs_find(&nw->app->prefs, nw->id); }
+
+/* ---- best-effort open-window registry, keyed by note id ----
+ * Lets the tray dedupe reopen requests. If full, the new entry just isn't
+ * tracked (treated as "not open"); correctness still holds. */
+#define NW_REGISTRY_CAP 64
+typedef struct { char id[16]; HWND hwnd; } NwRegEntry;
+static NwRegEntry s_registry[NW_REGISTRY_CAP];
+
+static void nw_registry_add(const char* id, HWND hwnd) {
+    for (int i = 0; i < NW_REGISTRY_CAP; i++) {
+        if (s_registry[i].hwnd == NULL) {
+            snprintf(s_registry[i].id, sizeof s_registry[i].id, "%s", id);
+            s_registry[i].hwnd = hwnd;
+            return;
+        }
+    }
+    /* full: leave untracked (best-effort) */
+}
+
+static void nw_registry_remove(HWND hwnd) {
+    for (int i = 0; i < NW_REGISTRY_CAP; i++) {
+        if (s_registry[i].hwnd == hwnd) {
+            s_registry[i].hwnd = NULL;
+            s_registry[i].id[0] = '\0';
+            return;
+        }
+    }
+}
+
+HWND note_window_find_open(const char* id) {
+    for (int i = 0; i < NW_REGISTRY_CAP; i++) {
+        if (s_registry[i].hwnd != NULL && strcmp(s_registry[i].id, id) == 0)
+            return s_registry[i].hwnd;
+    }
+    return NULL;
+}
+
 static void nw_layout(HWND hwnd, NoteWin* nw) {
     RECT rc; GetClientRect(hwnd, &rc);
     MoveWindow(nw->edit, 0, TITLEBAR_H, rc.right, rc.bottom - TITLEBAR_H, TRUE);
 }
 
 static void nw_load_content(NoteWin* nw) {
+    NoteMeta* m = nw_meta(nw);
+    if (!m) return;
     char path[260];
-    app_note_path(nw->app, nw->meta, path, sizeof path);
+    app_note_path(nw->app, m, path, sizeof path);
     char* txt = NULL; size_t n = 0;
     if (store_read_note(path, &txt, &n)) {
         SetWindowTextA(nw->edit, txt);   /* RichEdit accepts ANSI text */
@@ -46,12 +90,14 @@ static void nw_load_content(NoteWin* nw) {
 }
 
 static void nw_save_content(NoteWin* nw) {
+    NoteMeta* m = nw_meta(nw);
+    if (!m) return;
     int len = GetWindowTextLengthA(nw->edit);
     char* buf = malloc((size_t)len + 1);
     if (!buf) return;
     GetWindowTextA(nw->edit, buf, len + 1);
     char path[260];
-    app_note_path(nw->app, nw->meta, path, sizeof path);
+    app_note_path(nw->app, m, path, sizeof path);
     store_write_note(path, buf, (size_t)len);
     free(buf);
 }
@@ -180,7 +226,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (GetKeyState(VK_SHIFT) & 0x8000) {
                     if (MessageBoxW(hwnd, L"Delete this note permanently?",
                                     L"Delete", MB_YESNO|MB_ICONWARNING) == IDYES) {
-                        char id[16]; strcpy(id, nw->meta->id);
+                        char id[16]; strcpy(id, nw->id);
                         DestroyWindow(hwnd);
                         app_delete_note(nw->app, id);
                         return 0;
@@ -190,8 +236,13 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     return 0;
                 }
             } else if (pt.x >= rc.right - 2*BTN_W) {   /* + : new note */
+                /* Read offset coords BEFORE app_new_note (it may realloc the
+                 * notes array, invalidating any NoteMeta*). */
+                int ox = 224, oy = 224;
+                NoteMeta* cur = nw_meta(nw);
+                if (cur) { ox = cur->x + 24; oy = cur->y + 24; }
                 NoteMeta* m = app_new_note(nw->app);
-                if (m) { m->x = nw->meta->x + 24; m->y = nw->meta->y + 24;
+                if (m) { m->x = ox; m->y = oy;
                          note_window_open(nw->app, m); }
                 return 0;
             }
@@ -204,9 +255,11 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_EXITSIZEMOVE: {
         if (!nw) return 0;
+        NoteMeta* m = nw_meta(nw);
+        if (!m) return 0;
         RECT wr; GetWindowRect(hwnd, &wr);
-        nw->meta->x = wr.left; nw->meta->y = wr.top;
-        nw->meta->w = wr.right - wr.left; nw->meta->h = wr.bottom - wr.top;
+        m->x = wr.left; m->y = wr.top;
+        m->w = wr.right - wr.left; m->h = wr.bottom - wr.top;
         return 0;
     }
     case WM_COMMAND:
@@ -215,7 +268,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_TIMER:
-        if (wp == IDT_DEBOUNCE) {
+        if (wp == IDT_DEBOUNCE && nw) {
             KillTimer(hwnd, IDT_DEBOUNCE);
             SendMessageW(nw->edit, WM_SETREDRAW, FALSE, 0);
             nw_save_content(nw);
@@ -225,6 +278,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_DESTROY:
+        nw_registry_remove(hwnd);
         if (nw) {
             DeleteObject(nw->bg_brush);
             DeleteObject(nw->title_brush);
@@ -249,23 +303,28 @@ void note_window_register_class(HINSTANCE hInst) {
 
 HWND note_window_open(AppState* app, NoteMeta* meta) {
     NoteWin* nw = calloc(1, sizeof *nw);
-    nw->app = app; nw->meta = meta;
+    nw->app = app;
+    snprintf(nw->id, sizeof nw->id, "%s", meta->id);
     meta->open = true;
     HWND h = CreateWindowExW(WS_EX_TOOLWINDOW, NOTE_CLASS, L"Note",
         WS_POPUP | WS_THICKFRAME | WS_VISIBLE,
         meta->x, meta->y, meta->w, meta->h,
         NULL, NULL, GetModuleHandleW(NULL), nw);
+    if (h) nw_registry_add(nw->id, h);
     return h;
 }
 
 void note_window_close(HWND hwnd) {
     NoteWin* nw = nw_get(hwnd);
     if (nw) {
-        RECT wr; GetWindowRect(hwnd, &wr);
-        nw->meta->x = wr.left; nw->meta->y = wr.top;
-        nw->meta->w = wr.right - wr.left; nw->meta->h = wr.bottom - wr.top;
-        nw_save_content(nw);
-        nw->meta->open = false;
+        NoteMeta* m = nw_meta(nw);
+        if (m) {
+            RECT wr; GetWindowRect(hwnd, &wr);
+            m->x = wr.left; m->y = wr.top;
+            m->w = wr.right - wr.left; m->h = wr.bottom - wr.top;
+            nw_save_content(nw);
+            m->open = false;
+        }
     }
     DestroyWindow(hwnd);
 }

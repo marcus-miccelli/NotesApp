@@ -40,4 +40,29 @@ void test_prefs(void) {
     CHECK(!prefs_load(&z, "C:\\tmp\\sntest_does_not_exist.json"));
     CHECK(z.version == 1 && z.count == 0);
     prefs_free(&z);
+
+    /* corrupt file -> false + defaults + a .bak backup with the original bytes */
+    const char* corrupt_path = "C:\\tmp\\sntest_prefs_corrupt.json";
+    const char* bak_path = "C:\\tmp\\sntest_prefs_corrupt.json.bak";
+    const char* corrupt_bytes = "{ this is : not json";
+    remove(bak_path);
+    FILE* cf = fopen(corrupt_path, "wb");
+    CHECK(cf != NULL);
+    if (cf) { fputs(corrupt_bytes, cf); fclose(cf); }
+
+    Prefs c;
+    CHECK(!prefs_load(&c, corrupt_path));        /* corrupt -> false */
+    CHECK(c.version == 1 && c.count == 0);       /* defaults */
+    prefs_free(&c);
+
+    /* the .bak now exists and holds the original corrupt bytes */
+    FILE* bf = fopen(bak_path, "rb");
+    CHECK(bf != NULL);
+    if (bf) {
+        char rbuf[64]; size_t rn = fread(rbuf, 1, sizeof rbuf - 1, bf);
+        rbuf[rn] = '\0'; fclose(bf);
+        CHECK_STR(rbuf, corrupt_bytes);
+    }
+    remove(corrupt_path);
+    remove(bak_path);
 }

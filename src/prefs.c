@@ -80,8 +80,17 @@ bool prefs_load(Prefs* p, const char* json_path) {
     size_t r = fread(buf, 1, (size_t)sz, f); buf[r] = '\0'; fclose(f);
 
     cJSON* root = cJSON_Parse(buf);
+    if (!root) {
+        /* File existed and was non-empty but is corrupt: preserve a backup
+         * before defaults get saved over it on shutdown. */
+        char bak[600];
+        snprintf(bak, sizeof bak, "%s.bak", json_path);
+        FILE* bf = fopen(bak, "wb");
+        if (bf) { fwrite(buf, 1, r, bf); fclose(bf); }
+        free(buf);
+        return false;
+    }
     free(buf);
-    if (!root) return false;
 
     p->version = json_int(root, "version", 1);
     copy_str(p->theme, sizeof p->theme, json_str(root, "theme", "dark"), "dark");

@@ -39,7 +39,10 @@ NoteMeta* app_new_note(AppState* a) {
     if (!m) return NULL;
     char path[260];
     app_note_path(a, m, path, sizeof path);
-    store_write_note(path, "", 0);   /* create empty file */
+    if (!store_write_note(path, "", 0)) {  /* create empty file */
+        prefs_remove(&a->prefs, id);       /* roll back the just-added entry */
+        return NULL;
+    }
     m->open = true;
     return m;
 }

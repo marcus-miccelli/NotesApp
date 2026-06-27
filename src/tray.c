@@ -47,7 +47,12 @@ static LRESULT CALLBACK owner_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             PostQuitMessage(0);
         } else if (id >= IDM_NOTE0) {
             size_t i = id - IDM_NOTE0;
-            if (i < s_app->prefs.count) note_window_open(s_app, &s_app->prefs.notes[i]);
+            if (i < s_app->prefs.count) {
+                NoteMeta* nm = &s_app->prefs.notes[i];
+                HWND existing = note_window_find_open(nm->id);
+                if (existing) SetForegroundWindow(existing);
+                else note_window_open(s_app, nm);
+            }
         }
         return 0;
     }
@@ -73,7 +78,12 @@ bool tray_init(AppState* app, HINSTANCE hInst) {
     s_nid.uCallbackMessage = WM_TRAY;
     s_nid.hIcon = LoadIconW(NULL, MAKEINTRESOURCEW(32512)); /* IDI_APPLICATION */
     wcscpy(s_nid.szTip, L"Sticky Notes");
-    return Shell_NotifyIconW(NIM_ADD, &s_nid);
+    if (!Shell_NotifyIconW(NIM_ADD, &s_nid)) {
+        DestroyWindow(s_owner);
+        s_owner = NULL;
+        return false;
+    }
+    return true;
 }
 
 void tray_shutdown(void) {
