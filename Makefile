@@ -16,8 +16,8 @@ APP_SRC := src/main.c
 APP_OBJ := $(APP_SRC:.c=.o)
 
 # Pure-logic sources compiled into the test binary (added to as tasks land)
-LOGIC_SRC := src/paths.c src/store.c src/prefs.c third_party/cjson/cJSON.c src/markdown.c third_party/md4c/md4c.c
-TEST_SRC  := tests/runner.c tests/test_smoke.c tests/test_paths.c tests/test_store.c tests/test_prefs.c tests/test_markdown.c
+LOGIC_SRC := src/paths.c src/store.c src/prefs.c third_party/cjson/cJSON.c src/markdown.c third_party/md4c/md4c.c src/app.c
+TEST_SRC  := tests/runner.c tests/test_smoke.c tests/test_paths.c tests/test_store.c tests/test_prefs.c tests/test_markdown.c tests/test_app.c
 TEST_OBJ  := $(TEST_SRC:.c=.o) $(LOGIC_SRC:.c=.o)
 
 .PHONY: all app test clean
