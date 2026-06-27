@@ -108,15 +108,17 @@ static void nw_apply_format(NoteWin* nw) {
     gte.codepage = CP_ACP; gte.lpDefaultChar = NULL; gte.lpUsedDefChar = NULL;
     SendMessageW(nw->edit, EM_GETTEXTEX, (WPARAM)&gte, (LPARAM)buf);
 
+    /* capture real caret BEFORE any selection changes */
+    CHARRANGE saved_sel;
+    SendMessageW(nw->edit, EM_EXGETSEL, 0, (LPARAM)&saved_sel);
+
     /* reset everything to default first */
     CHARRANGE all = { 0, -1 };
     SendMessageW(nw->edit, EM_EXSETSEL, 0, (LPARAM)&all);
     CHARFORMAT2W base; memset(&base, 0, sizeof base); base.cbSize = sizeof base;
     base.dwMask = CFM_BOLD|CFM_ITALIC|CFM_SIZE|CFM_FACE|CFM_COLOR;
     base.yHeight = 200; base.crTextColor = COL_TEXT; wcscpy(base.szFaceName, L"Segoe UI");
-    CHARRANGE saved; SendMessageW(nw->edit, EM_EXGETSEL, 0, (LPARAM)&saved);
     SendMessageW(nw->edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&base);
-    SendMessageW(nw->edit, EM_EXSETSEL, 0, (LPARAM)&saved);
 
     MdSpan spans[256];
     size_t n = markdown_spans(buf, (size_t)len, spans, 256);
@@ -124,6 +126,9 @@ static void nw_apply_format(NoteWin* nw) {
     for (size_t i = 0; i < n; i++)
         nw_set_range_fmt(nw->edit, spans[i].start, spans[i].len, spans[i].fmt);
     free(buf);
+
+    /* restore the real caret/selection */
+    SendMessageW(nw->edit, EM_EXSETSEL, 0, (LPARAM)&saved_sel);
 }
 
 static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
