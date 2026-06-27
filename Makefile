@@ -12,7 +12,7 @@ export TEMP := $(BUILD_TMP)
 $(shell mkdir -p $(BUILD_TMP))
 
 # GUI app sources (added to as tasks land)
-APP_SRC := src/main.c
+APP_SRC := src/main.c src/note_window.c
 APP_OBJ := $(APP_SRC:.c=.o)
 
 # Pure-logic sources compiled into the test binary (added to as tasks land)
@@ -23,8 +23,10 @@ TEST_OBJ  := $(TEST_SRC:.c=.o) $(LOGIC_SRC:.c=.o)
 .PHONY: all app test clean
 all: app
 
+LOGIC_OBJ := $(LOGIC_SRC:.c=.o)
+
 app: stickynotes.exe
-stickynotes.exe: $(APP_OBJ)
+stickynotes.exe: $(APP_OBJ) $(LOGIC_OBJ)
 	$(CC) $(CFLAGS) -mwindows -o $@ $^ $(LDLIBS)
 
 test: tests.exe
