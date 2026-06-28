@@ -143,13 +143,19 @@ static void nw_set_range_fmt(HWND edit, size_t start, size_t len, MdFmt fmt) {
 }
 
 static void nw_apply_format(NoteWin* nw) {
+    /* Applying CHARFORMAT makes RichEdit emit EN_CHANGE/EN_UPDATE. Without
+     * suppressing them, each reformat re-arms the debounce timer and we loop
+     * forever (constant reflow = flicker + the text never settles formatted).
+     * Mute notifications for the duration of the programmatic restyle. */
+    SendMessageW(nw->edit, EM_SETEVENTMASK, 0, 0);
+
     /* Use EM_GETTEXTEX with GT_DEFAULT + CP_ACP: returns \r-only line endings
      * whose byte offsets match RichEdit's internal character positions exactly. */
     GETTEXTLENGTHEX gtl; gtl.flags = GTL_DEFAULT; gtl.codepage = CP_ACP;
     int len = (int)SendMessageW(nw->edit, EM_GETTEXTLENGTHEX, (WPARAM)&gtl, 0);
-    if (len <= 0) return;
+    if (len <= 0) { SendMessageW(nw->edit, EM_SETEVENTMASK, 0, ENM_CHANGE); return; }
     char* buf = malloc((size_t)len + 1);
-    if (!buf) return;
+    if (!buf) { SendMessageW(nw->edit, EM_SETEVENTMASK, 0, ENM_CHANGE); return; }
     GETTEXTEX gte; gte.cb = (DWORD)(len + 1); gte.flags = GT_DEFAULT;
     gte.codepage = CP_ACP; gte.lpDefaultChar = NULL; gte.lpUsedDefChar = NULL;
     SendMessageW(nw->edit, EM_GETTEXTEX, (WPARAM)&gte, (LPARAM)buf);
@@ -175,6 +181,9 @@ static void nw_apply_format(NoteWin* nw) {
 
     /* restore the real caret/selection */
     SendMessageW(nw->edit, EM_EXSETSEL, 0, (LPARAM)&saved_sel);
+
+    /* re-enable change notifications now that the restyle is done */
+    SendMessageW(nw->edit, EM_SETEVENTMASK, 0, ENM_CHANGE);
 }
 
 static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -201,7 +210,14 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_SIZE:
-        if (nw) nw_layout(hwnd, nw);
+        if (nw) {
+            nw_layout(hwnd, nw);
+            /* Title-bar buttons are positioned from the right edge, so the
+             * strip must be repainted whenever the width changes. */
+            RECT rc; GetClientRect(hwnd, &rc);
+            RECT title = { 0, 0, rc.right, TITLEBAR_H };
+            InvalidateRect(hwnd, &title, TRUE);
+        }
         return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(hwnd, &ps);
