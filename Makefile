@@ -1,6 +1,6 @@
 CC      := gcc
 CFLAGS  := -std=c11 -Wall -Wextra -O2 -Isrc -Ithird_party/md4c -Ithird_party/cjson
-LDLIBS  := -lgdi32 -lcomctl32 -lole32 -lshell32
+LDLIBS  := -lgdi32 -lcomctl32 -lole32 -lshell32 -ldwmapi
 
 # Build-temp fix: cc1/collect2 need a writable temp dir, obtained via the
 # Windows GetTempPath env vars (TMP/TEMP). GNU Make scrubs these from recipe

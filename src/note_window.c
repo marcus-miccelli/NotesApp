@@ -1,33 +1,39 @@
 #include "note_window.h"
 #include "store.h"
 #include "markdown.h"
-#include <windowsx.h>
 #include <richedit.h>
+#include <dwmapi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define NOTE_CLASS L"StickyNoteWindow"
-#define ID_EDIT     1001
-#define TITLEBAR_H  26
-#define BTN_W       22
-#define DEBOUNCE_MS 150
+#define NOTE_CLASS   L"StickyNoteWindow"
+#define ID_EDIT      1001
+#define DEBOUNCE_MS  150
 #define IDT_DEBOUNCE 1
 
+/* Notifications we want from the RichEdit: text changes (for live-format
+ * debounce) and key events (for Ctrl+N / Ctrl+Shift+D via EN_MSGFILTER). */
+#define EDIT_EVENT_MASK (ENM_CHANGE | ENM_KEYEVENTS)
+
+/* DWM dark title bar. Attribute 20 = DWMWA_USE_IMMERSIVE_DARK_MODE on
+ * Windows 10 2004+ (older insider builds used 19). */
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+
 /* Dark palette */
-static const COLORREF COL_BG     = RGB(0x1e, 0x1e, 0x22);
-static const COLORREF COL_TEXT   = RGB(0xe6, 0xe6, 0xe6);
-static const COLORREF COL_TITLE  = RGB(0x2b, 0x3b, 0x55); /* "slate" accent */
+static const COLORREF COL_BG   = RGB(0x1e, 0x1e, 0x22);
+static const COLORREF COL_TEXT = RGB(0xe6, 0xe6, 0xe6);
 
 typedef struct {
     AppState* app;
     char id[16];               /* note id; resolve NoteMeta* fresh via nw_meta() */
     HWND edit;
-    HBRUSH bg_brush;
-    HBRUSH title_brush;
 } NoteWin;
 
 static HMODULE g_richedit = NULL;
+static HBRUSH  g_bg_brush = NULL;   /* class background, dark; created once */
 
 static NoteWin* nw_get(HWND h) { return (NoteWin*)GetWindowLongPtrW(h, GWLP_USERDATA); }
 
@@ -72,9 +78,11 @@ HWND note_window_find_open(const char* id) {
     return NULL;
 }
 
+/* The RichEdit fills the entire client area (the native title bar provides the
+ * window chrome now). */
 static void nw_layout(HWND hwnd, NoteWin* nw) {
     RECT rc; GetClientRect(hwnd, &rc);
-    MoveWindow(nw->edit, 0, TITLEBAR_H, rc.right, rc.bottom - TITLEBAR_H, TRUE);
+    MoveWindow(nw->edit, 0, 0, rc.right, rc.bottom, TRUE);
 }
 
 static void nw_load_content(NoteWin* nw) {
@@ -153,9 +161,9 @@ static void nw_apply_format(NoteWin* nw) {
      * whose byte offsets match RichEdit's internal character positions exactly. */
     GETTEXTLENGTHEX gtl; gtl.flags = GTL_DEFAULT; gtl.codepage = CP_ACP;
     int len = (int)SendMessageW(nw->edit, EM_GETTEXTLENGTHEX, (WPARAM)&gtl, 0);
-    if (len <= 0) { SendMessageW(nw->edit, EM_SETEVENTMASK, 0, ENM_CHANGE); return; }
+    if (len <= 0) { SendMessageW(nw->edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK); return; }
     char* buf = malloc((size_t)len + 1);
-    if (!buf) { SendMessageW(nw->edit, EM_SETEVENTMASK, 0, ENM_CHANGE); return; }
+    if (!buf) { SendMessageW(nw->edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK); return; }
     GETTEXTEX gte; gte.cb = (DWORD)(len + 1); gte.flags = GT_DEFAULT;
     gte.codepage = CP_ACP; gte.lpDefaultChar = NULL; gte.lpUsedDefChar = NULL;
     SendMessageW(nw->edit, EM_GETTEXTEX, (WPARAM)&gte, (LPARAM)buf);
@@ -182,8 +190,40 @@ static void nw_apply_format(NoteWin* nw) {
     /* restore the real caret/selection */
     SendMessageW(nw->edit, EM_EXSETSEL, 0, (LPARAM)&saved_sel);
 
-    /* re-enable change notifications now that the restyle is done */
-    SendMessageW(nw->edit, EM_SETEVENTMASK, 0, ENM_CHANGE);
+    /* re-enable change + key notifications now that the restyle is done */
+    SendMessageW(nw->edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
+}
+
+/* Spawn a new note offset from this one. */
+static void nw_new_note(NoteWin* nw) {
+    int ox = 224, oy = 224;
+    NoteMeta* cur = nw_meta(nw);     /* read coords BEFORE app_new_note (it may realloc) */
+    if (cur) { ox = cur->x + 24; oy = cur->y + 24; }
+    NoteMeta* m = app_new_note(nw->app);
+    if (m) { m->x = ox; m->y = oy; note_window_open(nw->app, m); }
+}
+
+/* Delete this note (with confirmation), removing its .md and index entry. */
+static void nw_delete_note(NoteWin* nw, HWND hwnd) {
+    if (MessageBoxW(hwnd, L"Delete this note permanently?",
+                    L"Delete", MB_YESNO | MB_ICONWARNING) != IDYES) return;
+    /* Capture before DestroyWindow: WM_DESTROY frees nw synchronously. */
+    char id[16]; strcpy(id, nw->id);
+    AppState* app = nw->app;
+    DestroyWindow(hwnd);
+    app_delete_note(app, id);
+}
+
+/* Handle Ctrl+N / Ctrl+Shift+D forwarded from the RichEdit via EN_MSGFILTER.
+ * Returns nonzero if the keystroke was consumed (so the control ignores it). */
+static LRESULT nw_handle_key(NoteWin* nw, HWND hwnd, const MSGFILTER* mf) {
+    if (mf->msg != WM_KEYDOWN) return 0;
+    BOOL ctrl  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    BOOL shift = (GetKeyState(VK_SHIFT)   & 0x8000) != 0;
+    if (!ctrl) return 0;
+    if (mf->wParam == 'N' && !shift) { nw_new_note(nw); return 1; }
+    if (mf->wParam == 'D' && shift)  { nw_delete_note(nw, hwnd); return 1; }
+    return 0;
 }
 
 static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -193,85 +233,40 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         CREATESTRUCTW* cs = (CREATESTRUCTW*)lp;
         nw = (NoteWin*)cs->lpCreateParams;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)nw);
-        nw->bg_brush = CreateSolidBrush(COL_BG);
-        nw->title_brush = CreateSolidBrush(COL_TITLE);
+
+        /* Dark native title bar (best-effort; ignored on older Windows). */
+        BOOL dark = TRUE;
+        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof dark);
+
         nw->edit = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
-            0, TITLEBAR_H, 100, 100, hwnd, (HMENU)ID_EDIT,
-            cs->hInstance, NULL);
+            0, 0, 100, 100, hwnd, (HMENU)ID_EDIT, cs->hInstance, NULL);
         /* dark background + text color for RichEdit */
         SendMessageW(nw->edit, EM_SETBKGNDCOLOR, 0, (LPARAM)COL_BG);
         CHARFORMAT2W cf; memset(&cf, 0, sizeof cf);
         cf.cbSize = sizeof cf; cf.dwMask = CFM_COLOR; cf.crTextColor = COL_TEXT;
         SendMessageW(nw->edit, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
-        SendMessageW(nw->edit, EM_SETEVENTMASK, 0, ENM_CHANGE);
+        SendMessageW(nw->edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
         nw_load_content(nw);
         nw_layout(hwnd, nw);
+        SetFocus(nw->edit);
         return 0;
     }
     case WM_SIZE:
-        if (nw) {
-            nw_layout(hwnd, nw);
-            /* Title-bar buttons are positioned from the right edge, so the
-             * strip must be repainted whenever the width changes. */
-            RECT rc; GetClientRect(hwnd, &rc);
-            RECT title = { 0, 0, rc.right, TITLEBAR_H };
-            InvalidateRect(hwnd, &title, TRUE);
-        }
+        if (nw) nw_layout(hwnd, nw);
         return 0;
-    case WM_PAINT: {
-        PAINTSTRUCT ps; HDC dc = BeginPaint(hwnd, &ps);
-        if (!nw) { EndPaint(hwnd, &ps); return 0; }
-        RECT rc; GetClientRect(hwnd, &rc);
-        RECT title = { 0, 0, rc.right, TITLEBAR_H };
-        FillRect(dc, &title, nw->title_brush);
-        /* draw + and x buttons */
-        SetBkMode(dc, TRANSPARENT); SetTextColor(dc, COL_TEXT);
-        RECT bplus = { rc.right - 2*BTN_W, 0, rc.right - BTN_W, TITLEBAR_H };
-        RECT bclose = { rc.right - BTN_W, 0, rc.right, TITLEBAR_H };
-        DrawTextW(dc, L"+", 1, &bplus, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
-        DrawTextW(dc, L"x", 1, &bclose, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
-        EndPaint(hwnd, &ps);
+    case WM_SETFOCUS:
+        if (nw) SetFocus(nw->edit);   /* keep focus on the editor */
+        return 0;
+    case WM_NOTIFY: {
+        NMHDR* hdr = (NMHDR*)lp;
+        if (nw && hdr->idFrom == ID_EDIT && hdr->code == EN_MSGFILTER)
+            return nw_handle_key(nw, hwnd, (MSGFILTER*)lp);
         return 0;
     }
-    case WM_LBUTTONDOWN: {
-        POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        RECT rc; GetClientRect(hwnd, &rc);
-        if (pt.y < TITLEBAR_H) {
-            if (pt.x >= rc.right - BTN_W) {            /* x: close (or delete w/ shift) */
-                if (GetKeyState(VK_SHIFT) & 0x8000) {
-                    if (MessageBoxW(hwnd, L"Delete this note permanently?",
-                                    L"Delete", MB_YESNO|MB_ICONWARNING) == IDYES) {
-                        /* Capture app before DestroyWindow: WM_DESTROY frees
-                         * nw synchronously, so nw->app must not be read after. */
-                        char id[16]; strcpy(id, nw->id);
-                        AppState* app = nw->app;
-                        DestroyWindow(hwnd);
-                        app_delete_note(app, id);
-                        return 0;
-                    }
-                } else {
-                    note_window_close(hwnd);
-                    return 0;
-                }
-            } else if (pt.x >= rc.right - 2*BTN_W) {   /* + : new note */
-                /* Read offset coords BEFORE app_new_note (it may realloc the
-                 * notes array, invalidating any NoteMeta*). */
-                int ox = 224, oy = 224;
-                NoteMeta* cur = nw_meta(nw);
-                if (cur) { ox = cur->x + 24; oy = cur->y + 24; }
-                NoteMeta* m = app_new_note(nw->app);
-                if (m) { m->x = ox; m->y = oy;
-                         note_window_open(nw->app, m); }
-                return 0;
-            }
-            /* else: drag the window via the title bar */
-            ReleaseCapture();
-            SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
-            return 0;
-        }
-        break;
-    }
+    case WM_CLOSE:                     /* native title-bar X */
+        note_window_close(hwnd);
+        return 0;
     case WM_EXITSIZEMOVE: {
         if (!nw) return 0;
         NoteMeta* m = nw_meta(nw);
@@ -299,8 +294,6 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
         nw_registry_remove(hwnd);
         if (nw) {
-            DeleteObject(nw->bg_brush);
-            DeleteObject(nw->title_brush);
             free(nw);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         }
@@ -311,25 +304,31 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 void note_window_register_class(HINSTANCE hInst) {
     if (!g_richedit) g_richedit = LoadLibraryW(L"Msftedit.dll");
+    if (!g_bg_brush) g_bg_brush = CreateSolidBrush(COL_BG);
     WNDCLASSEXW wc; memset(&wc, 0, sizeof wc);
     wc.cbSize = sizeof wc;
     wc.lpfnWndProc = nw_proc;
     wc.hInstance = hInst;
     wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512)); /* IDC_ARROW */
+    wc.hbrBackground = g_bg_brush;     /* dark fill avoids white flash on resize */
     wc.lpszClassName = NOTE_CLASS;
     RegisterClassExW(&wc);
 }
 
 HWND note_window_open(AppState* app, NoteMeta* meta) {
     NoteWin* nw = calloc(1, sizeof *nw);
+    if (!nw) return NULL;
     nw->app = app;
     snprintf(nw->id, sizeof nw->id, "%s", meta->id);
     meta->open = true;
-    HWND h = CreateWindowExW(WS_EX_TOOLWINDOW, NOTE_CLASS, L"Note",
-        WS_POPUP | WS_THICKFRAME | WS_VISIBLE,
+    /* Native captioned, resizable tool window: real title bar with a close
+     * button, draggable caption, no taskbar button (sticky-note friendly). */
+    HWND h = CreateWindowExW(WS_EX_TOOLWINDOW, NOTE_CLASS, L"Sticky Note",
+        WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_VISIBLE,
         meta->x, meta->y, meta->w, meta->h,
         NULL, NULL, GetModuleHandleW(NULL), nw);
     if (h) nw_registry_add(nw->id, h);
+    else   free(nw);
     return h;
 }
 

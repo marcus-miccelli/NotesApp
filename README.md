@@ -21,9 +21,11 @@ Stored under `%APPDATA%\StickyNotes\`:
 ## Usage
 
 - Run `stickynotes.exe`. A tray icon manages notes.
-- `+` on a note: new note. `x`: close (keeps file).
-- Shift+`x`: delete the note permanently (confirms first).
+- Each note is a dark native window; the title-bar **X** closes it (keeps the file).
+- **Ctrl+N**: new note. **Ctrl+Shift+D**: delete the note permanently (confirms first).
 - Tray menu: New Note, reopen a note, Quit.
+- Markdown is styled live as you type (headings, **bold**, *italic*, `code`); the
+  source markers stay visible.
 
 ## Tech
 
