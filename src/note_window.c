@@ -128,13 +128,61 @@ static void nw_save_content(NoteWin* nw) {
  * md4c treats bare \r as a valid line ending (CommonMark §2.3), so parsing is
  * unaffected.
  */
+/* Apply CFE_HIDDEN to a character range: the chars stay in the buffer (so the
+ * .md keeps its markers) but render at zero width. Used to "consume" markdown
+ * delimiters so **bold** displays as just bold. */
+static void nw_hide_range(HWND edit, size_t start, size_t len) {
+    if (len == 0) return;
+    CHARRANGE r; r.cpMin = (LONG)start; r.cpMax = (LONG)(start + len);
+    SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&r);
+    CHARFORMAT2W cf; memset(&cf, 0, sizeof cf); cf.cbSize = sizeof cf;
+    cf.dwMask = CFM_HIDDEN; cf.dwEffects = CFE_HIDDEN;
+    SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+}
+
+/* Hide the delimiter characters belonging to one formatted span, derived from
+ * the literal markers adjacent to its content in buf:
+ *   headings  -> the leading "#...# " up to the content (no trailing marker)
+ *   code      -> the run of backticks on each side
+ *   bold/italic -> up to (bold?2:0)+(italic?1:0) of * or _ on each side
+ * We only hide markers next to a span md4c actually recognized, so stray or
+ * escaped asterisks (no span) are left visible. */
+static void nw_apply_hidden(HWND edit, const char* buf, int len, const MdSpan* s) {
+    size_t a = s->start, b = s->start + s->len;
+    MdFmt f = s->fmt;
+    if (f & (MD_FMT_H1 | MD_FMT_H2 | MD_FMT_H3)) {
+        size_t ls = a;
+        while (ls > 0 && buf[ls-1] != '\n' && buf[ls-1] != '\r') ls--;
+        nw_hide_range(edit, ls, a - ls);          /* "# ", "## ", ... */
+        return;
+    }
+    if (f & MD_FMT_CODE) {
+        size_t i = a, cnt = 0; while (i > 0 && buf[i-1] == '`') { i--; cnt++; }
+        nw_hide_range(edit, a - cnt, cnt);
+        size_t j = b; cnt = 0; while (j < (size_t)len && buf[j] == '`') { j++; cnt++; }
+        nw_hide_range(edit, b, cnt);
+        return;
+    }
+    int want = ((f & MD_FMT_BOLD) ? 2 : 0) + ((f & MD_FMT_ITALIC) ? 1 : 0);
+    if (want) {
+        size_t i = a; int cnt = 0;
+        while (i > 0 && cnt < want && (buf[i-1] == '*' || buf[i-1] == '_')) { i--; cnt++; }
+        nw_hide_range(edit, a - (size_t)cnt, (size_t)cnt);
+        size_t j = b; cnt = 0;
+        while (j < (size_t)len && cnt < want && (buf[j] == '*' || buf[j] == '_')) { j++; cnt++; }
+        nw_hide_range(edit, b, (size_t)cnt);
+    }
+}
+
 static void nw_set_range_fmt(HWND edit, size_t start, size_t len, MdFmt fmt) {
     CHARRANGE saved; SendMessageW(edit, EM_EXGETSEL, 0, (LPARAM)&saved);
     CHARRANGE r; r.cpMin = (LONG)start; r.cpMax = (LONG)(start + len);
     SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&r);
 
     CHARFORMAT2W cf; memset(&cf, 0, sizeof cf); cf.cbSize = sizeof cf;
-    cf.dwMask = CFM_BOLD | CFM_ITALIC | CFM_SIZE | CFM_FACE | CFM_COLOR;
+    /* include CFM_HIDDEN (effect bit off) so content is always shown, even if a
+     * prior pass had hidden these positions. */
+    cf.dwMask = CFM_BOLD | CFM_ITALIC | CFM_SIZE | CFM_FACE | CFM_COLOR | CFM_HIDDEN;
     cf.crTextColor = COL_TEXT;
     cf.yHeight = 200;                       /* 10pt default (twips) */
     if (fmt & MD_FMT_H1) cf.yHeight = 360;
@@ -176,15 +224,19 @@ static void nw_apply_format(NoteWin* nw) {
     CHARRANGE all = { 0, -1 };
     SendMessageW(nw->edit, EM_EXSETSEL, 0, (LPARAM)&all);
     CHARFORMAT2W base; memset(&base, 0, sizeof base); base.cbSize = sizeof base;
-    base.dwMask = CFM_BOLD|CFM_ITALIC|CFM_SIZE|CFM_FACE|CFM_COLOR;
+    /* CFM_HIDDEN (effect off) un-hides everything so deleted/moved markers
+     * reappear before we re-hide the current ones. */
+    base.dwMask = CFM_BOLD|CFM_ITALIC|CFM_SIZE|CFM_FACE|CFM_COLOR|CFM_HIDDEN;
     base.yHeight = 200; base.crTextColor = COL_TEXT; wcscpy(base.szFaceName, L"Segoe UI");
     SendMessageW(nw->edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&base);
 
     MdSpan spans[256];
     size_t n = markdown_spans(buf, (size_t)len, spans, 256);
     if (n > 256) n = 256;
-    for (size_t i = 0; i < n; i++)
+    for (size_t i = 0; i < n; i++) {
         nw_set_range_fmt(nw->edit, spans[i].start, spans[i].len, spans[i].fmt);
+        nw_apply_hidden(nw->edit, buf, len, &spans[i]);   /* consume markers */
+    }
     free(buf);
 
     /* restore the real caret/selection */

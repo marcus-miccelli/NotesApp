@@ -24,8 +24,9 @@ Stored under `%APPDATA%\StickyNotes\`:
 - Each note is a dark native window; the title-bar **X** closes it (keeps the file).
 - **Ctrl+N**: new note. **Ctrl+Shift+D**: delete the note permanently (confirms first).
 - Tray menu: New Note, reopen a note, Quit.
-- Markdown is styled live as you type (headings, **bold**, *italic*, `code`); the
-  source markers stay visible.
+- Markdown is rendered live as you type (headings, **bold**, *italic*, `code`).
+  The delimiter characters are hidden (`**bold**` shows as bold) but kept in the
+  file, so the `.md` stays plain Markdown on disk.
 
 ## Tech
 
