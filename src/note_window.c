@@ -561,11 +561,15 @@ static int nw_marker_len(const char* buf, int len, LONG p) {
     return 0;
 }
 
-/* Toggle inline emphasis around the body selection by inserting/removing a
- * markdown marker ("**", "*", "~~"). If the selection is already wrapped in the
- * marker it is unwrapped; otherwise it is wrapped (with no selection, the caret
- * lands between the markers). The live formatter then renders + hides them. */
-static void nw_wrap_inline(NoteWin* nw, const char* marker) {
+/* Apply/toggle an inline markdown marker ("**", "*", "~~"; idx is the button
+ * index, used to read the live highlight state). With a selection it wraps, or
+ * unwraps if already wrapped. With a collapsed caret it depends on the format:
+ *   - caret between an empty pair (e.g. **|**): remove the markers entirely.
+ *   - caret inside a non-empty run of this format: escape it — jump past the
+ *     closing marker and insert a space (continue typing unformatted).
+ *   - otherwise: start the format (insert an empty pair, caret between them).
+ * The live formatter then renders + hides the markers. */
+static void nw_wrap_inline(NoteWin* nw, const char* marker, int idx) {
     if (nw_caret_on_heading(nw)) return;     /* headings are hard H1 */
     HWND e = nw->edit;
     int mlen = (int)strlen(marker);
@@ -578,6 +582,51 @@ static void nw_wrap_inline(NoteWin* nw, const char* marker) {
     LONG a = sel.cpMin, b = sel.cpMax;
     int len; char* buf = nw_body_text(e, &len);
     if (!buf) { SendMessageW(e, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK); return; }
+
+    if (a == b) {                              /* collapsed caret: escape logic */
+        int empty_pair = (a >= mlen && a + mlen <= len &&
+                          memcmp(buf + a - mlen, marker, (size_t)mlen) == 0 &&
+                          memcmp(buf + a, marker, (size_t)mlen) == 0);
+        if (empty_pair) {                      /* **|** -> remove entirely */
+            free(buf);
+            CHARRANGE r = { a - mlen, a + mlen };
+            SendMessageW(e, EM_EXSETSEL, 0, (LPARAM)&r);
+            SendMessageW(e, EM_REPLACESEL, TRUE, (LPARAM)L"");
+            SendMessageW(e, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
+            nw_reformat_now(nw);
+            return;
+        }
+        if (idx >= 0 && idx < NUM_BTNS && nw->active[idx]) {  /* inside this fmt */
+            LONG cpos = -1;                    /* find closing marker on this line */
+            for (LONG p = a; p + mlen <= len; p++) {
+                if (buf[p] == '\r' || buf[p] == '\n') break;
+                if (memcmp(buf + p, marker, (size_t)mlen) == 0) { cpos = p; break; }
+            }
+            free(buf);
+            if (cpos >= 0) {                   /* escape past it + a space */
+                CHARRANGE r = { cpos + mlen, cpos + mlen };
+                SendMessageW(e, EM_EXSETSEL, 0, (LPARAM)&r);
+                SendMessageW(e, EM_REPLACESEL, TRUE, (LPARAM)L" ");
+                SendMessageW(e, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
+                nw_reformat_now(nw);
+            } else {
+                SendMessageW(e, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
+            }
+            return;
+        }
+        free(buf);
+        /* not in this format: start it (insert empty pair, caret between) */
+        CHARRANGE r = { a, a };
+        SendMessageW(e, EM_EXSETSEL, 0, (LPARAM)&r);
+        wchar_t pair[16]; wcscpy(pair, wmark); wcscat(pair, wmark);
+        SendMessageW(e, EM_REPLACESEL, TRUE, (LPARAM)pair);
+        CHARRANGE c = { a + mlen, a + mlen };
+        SendMessageW(e, EM_EXSETSEL, 0, (LPARAM)&c);
+        SendMessageW(e, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
+        nw_reformat_now(nw);
+        return;
+    }
+
     int wrapped = (a >= mlen && b + mlen <= len &&
                    memcmp(buf + a - mlen, marker, (size_t)mlen) == 0 &&
                    memcmp(buf + b, marker, (size_t)mlen) == 0);
@@ -622,6 +671,32 @@ static void nw_list_prefix(NoteWin* nw, int numbered) {
 
     LONG ls = a;                                  /* start of line containing a */
     while (ls > 0 && buf[ls-1] != '\r' && buf[ls-1] != '\n') ls--;
+
+    /* Collapsed caret on a line already of this list kind: escape it. Empty
+     * item -> remove the marker; non-empty -> end it and drop to a new plain
+     * line (act as Return). */
+    if (a == b) {
+        LONG lend = ls; while (lend < len && buf[lend] != '\r' && buf[lend] != '\n') lend++;
+        int ml = nw_marker_len(buf, len, ls);
+        int isBullet = (ml == 2 && buf[ls] == '-');
+        int isNum    = (ml > 0 && buf[ls] >= '0' && buf[ls] <= '9');
+        if (numbered ? isNum : isBullet) {
+            int hasContent = (lend > ls + ml);
+            free(buf);
+            if (!hasContent) {
+                CHARRANGE r = { ls, ls + ml };
+                SendMessageW(e, EM_EXSETSEL, 0, (LPARAM)&r);
+                SendMessageW(e, EM_REPLACESEL, TRUE, (LPARAM)L"");
+            } else {
+                CHARRANGE r = { lend, lend };
+                SendMessageW(e, EM_EXSETSEL, 0, (LPARAM)&r);
+                SendMessageW(e, EM_REPLACESEL, TRUE, (LPARAM)L"\n");
+            }
+            SendMessageW(e, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
+            nw_reformat_now(nw);
+            return;
+        }
+    }
 
     LONG starts[256]; int ns = 0;                 /* line starts in [ls, b] */
     for (LONG p = ls;;) {
@@ -736,9 +811,9 @@ static LRESULT nw_handle_key(NoteWin* nw, HWND hwnd, const MSGFILTER* mf) {
     if (mf->wParam == 'D' && shift)  { nw_delete_note(nw, hwnd); return 1; }
 
     if (mf->nmhdr.idFrom == ID_EDIT) {
-        if (mf->wParam == 'B' && !shift) { nw_wrap_inline(nw, "**"); return 1; }
-        if (mf->wParam == 'I' && !shift) { nw_wrap_inline(nw, "*");  return 1; }
-        if (mf->wParam == 'X' && shift)  { nw_wrap_inline(nw, "~~"); return 1; }
+        if (mf->wParam == 'B' && !shift) { nw_wrap_inline(nw, "**", 0); return 1; }
+        if (mf->wParam == 'I' && !shift) { nw_wrap_inline(nw, "*",  1); return 1; }
+        if (mf->wParam == 'X' && shift)  { nw_wrap_inline(nw, "~~", 2); return 1; }
         if (mf->wParam == '8' && shift)  { nw_list_prefix(nw, 0);    return 1; }
         if (mf->wParam == '7' && shift)  { nw_list_prefix(nw, 1);    return 1; }
     }
@@ -856,9 +931,9 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND:
         if (HIWORD(wp) == BN_CLICKED && nw) {
             switch (LOWORD(wp)) {
-            case IDB_BOLD:   nw_wrap_inline(nw, "**"); break;
-            case IDB_ITALIC: nw_wrap_inline(nw, "*");  break;
-            case IDB_STRIKE: nw_wrap_inline(nw, "~~"); break;
+            case IDB_BOLD:   nw_wrap_inline(nw, "**", 0); break;
+            case IDB_ITALIC: nw_wrap_inline(nw, "*",  1); break;
+            case IDB_STRIKE: nw_wrap_inline(nw, "~~", 2); break;
             case IDB_BULLET: nw_list_prefix(nw, 0);    break;
             case IDB_NUM:    nw_list_prefix(nw, 1);    break;
             default: return 0;
