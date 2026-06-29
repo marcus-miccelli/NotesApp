@@ -4,6 +4,7 @@
 #include "resource.h"
 #include <richedit.h>
 #include <windowsx.h>
+#include <commctrl.h>
 #include <dwmapi.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,7 +37,7 @@
 #define REGION_GAP   8     /* between boxes */
 #define SIDEBAR_W    40    /* sidebar width (buttons are this wide, square) */
 #define TITLEBAR_H   34    /* custom title bar height (horizontal divider y) */
-#define WINBTN_W     34    /* min/max/close button width */
+#define WINBTN_W     46    /* min/max/close button width (native caption width) */
 #define BTN_GAP      3     /* between sidebar buttons */
 
 /* Notifications we want from the RichEdit: text changes (for live-format
@@ -55,7 +56,8 @@ static const COLORREF COL_BG     = RGB(0x1e, 0x1e, 0x22);
 static const COLORREF COL_TEXT   = RGB(0xe6, 0xe6, 0xe6);
 static const COLORREF COL_BORDER = RGB(0x44, 0x44, 0x4e);  /* region outlines */
 static const COLORREF COL_TOGGLE = RGB(0x3a, 0x3a, 0x46);  /* pressed button fill */
-static const COLORREF COL_CLOSE  = RGB(0xc0, 0x3a, 0x3a);  /* close button pressed */
+static const COLORREF COL_CLOSE  = RGB(0xc0, 0x3a, 0x3a);  /* close button hover */
+static const COLORREF COL_HOVER  = RGB(0x3a, 0x3a, 0x44);  /* min/max button hover */
 
 typedef struct {
     AppState* app;
@@ -64,6 +66,7 @@ typedef struct {
     HWND edit;                 /* multi-line markdown body */
     HWND btns[NUM_BTNS];       /* formatting sidebar buttons */
     HWND wbtns[NUM_WBTNS];     /* min / max / close chrome buttons */
+    int  whot[NUM_WBTNS];      /* hover state per chrome button */
     int  active[NUM_BTNS];     /* which formats apply at the caret (highlight) */
 } NoteWin;
 
@@ -186,27 +189,55 @@ static void nw_draw_button(NoteWin* nw, const DRAWITEMSTRUCT* d) {
     DeleteObject(f);
 }
 
-/* Owner-draw a window-chrome button (min/max/close): dark, with the accent (or
- * red, for close) filling when pressed. Glyph drawn in Segoe UI. */
-static void nw_draw_wbutton(const DRAWITEMSTRUCT* d) {
+/* Owner-draw a window caption button (min/max/close) like the native ones:
+ * transparent until hovered/pressed (close goes red), with a Segoe MDL2 Assets
+ * glyph. The maximize button shows the restore glyph while the window is zoomed. */
+static void nw_draw_wbutton(NoteWin* nw, HWND parent, const DRAWITEMSTRUCT* d) {
+    int idx = (int)d->CtlID - IDW_MIN;
+    int hot = (idx >= 0 && idx < NUM_WBTNS && nw->whot[idx]);
     int pressed = (d->itemState & ODS_SELECTED) != 0;
+
     COLORREF fill = COL_BG;
-    if (pressed) fill = (d->CtlID == IDW_CLOSE) ? COL_CLOSE : COL_TOGGLE;
+    if (d->CtlID == IDW_CLOSE) { if (hot || pressed) fill = COL_CLOSE; }
+    else if (pressed)          fill = COL_TOGGLE;
+    else if (hot)              fill = COL_HOVER;
     HBRUSH bg = CreateSolidBrush(fill);
     FillRect(d->hDC, &d->rcItem, bg);
     DeleteObject(bg);
 
+    const wchar_t* glyph = L"\xE921";                      /* min */
+    if (d->CtlID == IDW_MAX)   glyph = IsZoomed(parent) ? L"\xE923" : L"\xE922"; /* restore/max */
+    if (d->CtlID == IDW_CLOSE) glyph = L"\xE8BB";          /* close */
+
     LOGFONTW lf; memset(&lf, 0, sizeof lf);
-    lf.lfHeight = -14; lf.lfWeight = FW_NORMAL; wcscpy(lf.lfFaceName, L"Segoe UI");
+    lf.lfHeight = -10; lf.lfWeight = FW_NORMAL; wcscpy(lf.lfFaceName, L"Segoe MDL2 Assets");
     HFONT f = CreateFontIndirectW(&lf);
     HFONT old = (HFONT)SelectObject(d->hDC, f);
     SetBkMode(d->hDC, TRANSPARENT);
     SetTextColor(d->hDC, RGB(0xe6,0xe6,0xe6));
-    wchar_t txt[8]; GetWindowTextW(d->hwndItem, txt, 8);
     RECT r = d->rcItem;
-    DrawTextW(d->hDC, txt, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(d->hDC, glyph, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     SelectObject(d->hDC, old);
     DeleteObject(f);
+}
+
+/* Subclass for caption buttons: track hover so the button highlights like the
+ * native ones (BS_OWNERDRAW alone gives no hot state). */
+static LRESULT CALLBACK nw_wbtn_sub(HWND h, UINT msg, WPARAM wp, LPARAM lp,
+                                    UINT_PTR id, DWORD_PTR ref) {
+    NoteWin* nw = (NoteWin*)ref;
+    if (msg == WM_MOUSEMOVE) {
+        if (!nw->whot[id]) {
+            nw->whot[id] = 1;
+            TRACKMOUSEEVENT tme = { sizeof tme, TME_LEAVE, h, 0 };
+            TrackMouseEvent(&tme);
+            InvalidateRect(h, NULL, TRUE);
+        }
+    } else if (msg == WM_MOUSELEAVE) {
+        nw->whot[id] = 0;
+        InvalidateRect(h, NULL, TRUE);
+    }
+    return DefSubclassProc(h, msg, wp, lp);
 }
 
 /* Read the body as RichEdit-indexed text (\r breaks, CP_ACP); caller frees.
@@ -895,7 +926,15 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                 0, 0, WINBTN_W, TITLEBAR_H, hwnd,
                 (HMENU)(INT_PTR)wbtndefs[i].id, cs->hInstance, NULL);
+            SetWindowSubclass(nw->wbtns[i], nw_wbtn_sub, (UINT_PTR)i, (DWORD_PTR)nw);
         }
+
+        /* Custom frame: extend the client over the caption (so we draw the title
+         * bar) while keeping the real resize frame + shadow. */
+        MARGINS m = { 0, 0, 1, 0 };
+        DwmExtendFrameIntoClientArea(hwnd, &m);
+        SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 
         /* Title: single-line H1 box (no ES_MULTILINE). */
         nw->title = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
@@ -921,7 +960,11 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_SIZE:
-        if (nw) { nw_layout(hwnd, nw); InvalidateRect(hwnd, NULL, TRUE); }
+        if (nw) {
+            nw_layout(hwnd, nw);
+            InvalidateRect(hwnd, NULL, TRUE);
+            InvalidateRect(nw->wbtns[1], NULL, TRUE);   /* max<->restore glyph */
+        }
         return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC hdc = BeginPaint(hwnd, &ps);
@@ -940,31 +983,38 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         EndPaint(hwnd, &ps);
         return 0;
     }
-    case WM_LBUTTONDOWN:                 /* drag the window from the bare title bar */
-        if (GET_Y_LPARAM(lp) < TITLEBAR_H) {
-            ReleaseCapture();
-            SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+    case WM_NCCALCSIZE:                   /* claim the caption area as client */
+        if (wp) {
+            NCCALCSIZE_PARAMS* p = (NCCALCSIZE_PARAMS*)lp;
+            int bx = GetSystemMetrics(SM_CXFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+            int by = GetSystemMetrics(SM_CYFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+            p->rgrc[0].left   += bx;
+            p->rgrc[0].right  -= bx;
+            p->rgrc[0].bottom -= by;
+            if (IsZoomed(hwnd)) p->rgrc[0].top += by;   /* maximized: keep top on-screen */
+            /* else leave top: client extends over where the caption was */
             return 0;
         }
-        return 0;
-    case WM_LBUTTONDBLCLK:               /* double-click title bar: maximize/restore */
-        if (GET_Y_LPARAM(lp) < TITLEBAR_H) {
-            ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
-            return 0;
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    case WM_NCHITTEST: {                  /* resize borders + draggable title bar */
+        LRESULT def = DefWindowProcW(hwnd, msg, wp, lp);
+        if (def != HTCLIENT) return def;  /* sides / bottom / corners */
+        POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        ScreenToClient(hwnd, &pt);
+        RECT rc; GetClientRect(hwnd, &rc);
+        const int RS = 6;
+        if (pt.y < RS && !IsZoomed(hwnd)) {
+            if (pt.x < RS) return HTTOPLEFT;
+            if (pt.x >= rc.right - RS) return HTTOPRIGHT;
+            return HTTOP;
         }
-        return 0;
-    case WM_GETMINMAXINFO: {             /* keep maximize within the monitor work area */
+        if (pt.y < TITLEBAR_H) return HTCAPTION;   /* drag; child buttons sit on top */
+        return HTCLIENT;
+    }
+    case WM_GETMINMAXINFO: {
         MINMAXINFO* mmi = (MINMAXINFO*)lp;
-        HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        MONITORINFO mi; mi.cbSize = sizeof mi;
-        if (GetMonitorInfoW(mon, &mi)) {
-            mmi->ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left;
-            mmi->ptMaxPosition.y = mi.rcWork.top  - mi.rcMonitor.top;
-            mmi->ptMaxSize.x = mi.rcWork.right - mi.rcWork.left;
-            mmi->ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top;
-        }
-        mmi->ptMinTrackSize.x = 220;
-        mmi->ptMinTrackSize.y = 160;
+        mmi->ptMinTrackSize.x = 240;
+        mmi->ptMinTrackSize.y = 180;
         return 0;
     }
     case WM_SETFOCUS:
@@ -1014,7 +1064,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return TRUE;
         }
         if (nw && wp >= IDW_MIN && wp <= IDW_CLOSE) {
-            nw_draw_wbutton((const DRAWITEMSTRUCT*)lp);
+            nw_draw_wbutton(nw, hwnd, (const DRAWITEMSTRUCT*)lp);
             return TRUE;
         }
         return 0;
@@ -1084,12 +1134,11 @@ HWND note_window_open(AppState* app, NoteMeta* meta) {
     nw->app = app;
     snprintf(nw->id, sizeof nw->id, "%s", meta->id);
     meta->open = true;
-    /* Borderless, resizable window with custom chrome: the title bar (icon,
-     * name, min/max/close) is drawn in the client area. WS_THICKFRAME keeps
-     * resize borders; WS_EX_APPWINDOW keeps a taskbar button. */
-    HWND h = CreateWindowExW(WS_EX_APPWINDOW, NOTE_CLASS, L"quickNote",
-        WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX |
-        WS_CLIPCHILDREN | WS_VISIBLE,
+    /* Standard overlapped window (native frame: resize, snap, shadow, system
+     * menu, taskbar), but WM_NCCALCSIZE extends the client over the caption so
+     * the title bar (icon, name, min/max/close) is drawn by us. */
+    HWND h = CreateWindowExW(0, NOTE_CLASS, L"quickNote",
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VISIBLE,
         meta->x, meta->y, meta->w, meta->h,
         NULL, NULL, GetModuleHandleW(NULL), nw);
     if (h) nw_registry_add(nw->id, h);
