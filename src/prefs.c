@@ -31,7 +31,7 @@ NoteMeta* prefs_add_note(Prefs* p, const char* id, const char* file) {
     memset(m, 0, sizeof *m);
     copy_str(m->id, sizeof m->id, id, "");
     copy_str(m->file, sizeof m->file, file, "");
-    m->x = 200; m->y = 200; m->w = 280; m->h = 320;
+    m->x = 200; m->y = 200; m->w = 480; m->h = 360;   /* 4:3 */
     snprintf(m->color, sizeof m->color, "%s", "slate");
     m->open = true;
     return m;
@@ -105,8 +105,8 @@ bool prefs_load(Prefs* p, const char* json_path) {
         if (!m) break;
         m->x = json_int(it, "x", 200);
         m->y = json_int(it, "y", 200);
-        m->w = json_int(it, "w", 280);
-        m->h = json_int(it, "h", 320);
+        m->w = json_int(it, "w", 480);
+        m->h = json_int(it, "h", 360);
         copy_str(m->name, sizeof m->name, json_str(it, "name", ""), "");
         copy_str(m->color, sizeof m->color, json_str(it, "color", "slate"), "slate");
         m->open = json_bool(it, "open", true);

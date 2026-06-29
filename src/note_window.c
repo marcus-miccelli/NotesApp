@@ -26,7 +26,7 @@
  * a little inside its box so the border shows and text has padding. */
 #define PAD_OUTER    8     /* client edge -> boxes */
 #define REGION_GAP   8     /* between boxes */
-#define SIDEBAR_W    30    /* sidebar width (buttons are ~this wide, square) */
+#define SIDEBAR_W    40    /* sidebar width (buttons are this wide, square) */
 #define TITLE_H      30    /* title box height */
 #define BTN_GAP      3     /* between sidebar buttons */
 
@@ -215,17 +215,34 @@ static void nw_clear_toggles(NoteWin* nw) {
 }
 
 /* Recompute which formats apply at the body caret/selection and repaint any
- * button whose highlight changed. Inline styles come from the character format,
- * lists from the paragraph numbering. Headings highlight nothing. */
+ * button whose highlight changed. Inline styles are read from the markdown
+ * spans covering the caret (so several nested formats — bold+italic+strike —
+ * all light at once); lists come from the paragraph numbering. Headings
+ * highlight nothing. */
 static void nw_update_toggles(NoteWin* nw) {
     if (nw_caret_on_heading(nw)) { nw_clear_toggles(nw); return; }
     int s[NUM_BTNS] = { 0 };
-    CHARFORMAT2W cf; memset(&cf, 0, sizeof cf); cf.cbSize = sizeof cf;
-    cf.dwMask = CFM_BOLD | CFM_ITALIC | CFM_STRIKEOUT;
-    SendMessageW(nw->edit, EM_GETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
-    s[0] = (cf.dwMask & CFM_BOLD)     && (cf.dwEffects & CFE_BOLD);
-    s[1] = (cf.dwMask & CFM_ITALIC)   && (cf.dwEffects & CFE_ITALIC);
-    s[2] = (cf.dwMask & CFM_STRIKEOUT)&& (cf.dwEffects & CFE_STRIKEOUT);
+
+    CHARRANGE sel; SendMessageW(nw->edit, EM_EXGETSEL, 0, (LPARAM)&sel);
+    LONG caret = sel.cpMin;
+    int len; char* buf = nw_body_text(nw->edit, &len);
+    if (buf) {
+        MdSpan spans[256];
+        size_t n = markdown_spans(buf, (size_t)len, spans, 256);
+        if (n > 256) n = 256;
+        MdFmt f = 0;
+        for (size_t i = 0; i < n; i++) {
+            LONG a = (LONG)spans[i].start, b = a + (LONG)spans[i].len;
+            /* cover the char on either side of the caret, so the highlight
+             * holds right at a format boundary too */
+            if ((caret > a && caret <= b) || (caret >= a && caret < b))
+                f |= spans[i].fmt;
+        }
+        s[0] = (f & MD_FMT_BOLD)   != 0;
+        s[1] = (f & MD_FMT_ITALIC) != 0;
+        s[2] = (f & MD_FMT_STRIKE) != 0;
+        free(buf);
+    }
 
     PARAFORMAT2 pf; memset(&pf, 0, sizeof pf); pf.cbSize = sizeof pf;
     pf.dwMask = PFM_NUMBERING;
