@@ -3,6 +3,7 @@
 #include "markdown.h"
 #include "resource.h"
 #include <richedit.h>
+#include <windowsx.h>
 #include <dwmapi.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,13 +23,20 @@
 #define IDB_NUM      1104
 #define NUM_BTNS     5
 
+/* Custom window-chrome buttons (min / max / close), top-right of the title bar. */
+#define IDW_MIN      1200
+#define IDW_MAX      1201
+#define IDW_CLOSE    1202
+#define NUM_WBTNS    3
+
 /* Layout (px). Three bordered boxes — sidebar, title, body — sit inside the
  * client area with an outer pad and a gap between them; each control is inset
  * a little inside its box so the border shows and text has padding. */
 #define PAD_OUTER    8     /* client edge -> boxes */
 #define REGION_GAP   8     /* between boxes */
 #define SIDEBAR_W    40    /* sidebar width (buttons are this wide, square) */
-#define TITLE_H      30    /* title box height */
+#define TITLEBAR_H   34    /* custom title bar height (horizontal divider y) */
+#define WINBTN_W     34    /* min/max/close button width */
 #define BTN_GAP      3     /* between sidebar buttons */
 
 /* Notifications we want from the RichEdit: text changes (for live-format
@@ -47,6 +55,7 @@ static const COLORREF COL_BG     = RGB(0x1e, 0x1e, 0x22);
 static const COLORREF COL_TEXT   = RGB(0xe6, 0xe6, 0xe6);
 static const COLORREF COL_BORDER = RGB(0x44, 0x44, 0x4e);  /* region outlines */
 static const COLORREF COL_TOGGLE = RGB(0x3a, 0x3a, 0x46);  /* pressed button fill */
+static const COLORREF COL_CLOSE  = RGB(0xc0, 0x3a, 0x3a);  /* close button pressed */
 
 typedef struct {
     AppState* app;
@@ -54,12 +63,14 @@ typedef struct {
     HWND title;                /* single-line H1 title box; content = note name */
     HWND edit;                 /* multi-line markdown body */
     HWND btns[NUM_BTNS];       /* formatting sidebar buttons */
+    HWND wbtns[NUM_WBTNS];     /* min / max / close chrome buttons */
     int  active[NUM_BTNS];     /* which formats apply at the caret (highlight) */
 } NoteWin;
 
 static HMODULE g_richedit = NULL;
 static HBRUSH  g_bg_brush = NULL;     /* class background, dark; created once */
 static HBRUSH  g_border_brush = NULL; /* region outline; created once */
+static HICON   g_app_icon = NULL;     /* qN, painted in the top-left cell */
 
 static NoteWin* nw_get(HWND h) { return (NoteWin*)GetWindowLongPtrW(h, GWLP_USERDATA); }
 
@@ -104,29 +115,32 @@ HWND note_window_find_open(const char* id) {
     return NULL;
 }
 
-/* Layout geometry. Two dividers cross the whole window: a vertical line at
- * x=SIDEBAR_W and a full-width horizontal line at y=PAD_OUTER+TITLE_H. They make
- * four quadrants — top-left an empty bordered square, top-right the title,
- * bottom-left the button sidebar, bottom-right the body. vx/hy are the divider
- * lines; title/body are control rects. Any out param may be NULL. */
+/* Layout geometry. Two dividers cross the whole client area: a vertical line at
+ * x=SIDEBAR_W and a full-width horizontal line at y=TITLEBAR_H. They make four
+ * cells — top-left the app-icon square, top-right the title bar (name + window
+ * buttons), bottom-left the format sidebar, bottom-right the body. vx/hy are the
+ * dividers; title/body are control rects. Any out param may be NULL. */
 static void nw_regions(HWND hwnd, RECT* title, RECT* body, int* vx, int* hy) {
     RECT rc; GetClientRect(hwnd, &rc);
     int v  = SIDEBAR_W;                              /* vertical divider x */
-    int h  = PAD_OUTER + TITLE_H;                    /* horizontal divider y */
+    int h  = TITLEBAR_H;                             /* horizontal divider y */
     int cl = v + REGION_GAP;                         /* content left */
+    int btns_l = rc.right - NUM_WBTNS * WINBTN_W;    /* window buttons start */
+    int t_r = btns_l - REGION_GAP; if (t_r < cl) t_r = cl;
     int cr = rc.right - PAD_OUTER; if (cr < cl) cr = cl;
     int b_top = h + REGION_GAP, b_bot = rc.bottom - PAD_OUTER;
     if (b_bot < b_top) b_bot = b_top;
-    if (title) SetRect(title, cl, PAD_OUTER, cr, h - 3);
+    if (title) SetRect(title, cl, 4, t_r, h - 4);    /* name, left of the buttons */
     if (body)  SetRect(body,  cl, b_top, cr, b_bot);
     if (vx) *vx = v;
     if (hy) *hy = h;
 }
 
-/* Buttons are squares the full sidebar width (up to the vertical divider),
- * stacked from just below the horizontal divider. Title and body fill the
- * content column to the right of the vertical divider. */
+/* Sidebar buttons are squares the full sidebar width, stacked below the
+ * horizontal divider. Window buttons sit at the top-right of the title bar.
+ * Title and body fill the content column to the right of the vertical divider. */
 static void nw_layout(HWND hwnd, NoteWin* nw) {
+    RECT rc; GetClientRect(hwnd, &rc);
     RECT tt, bd; int vx, hy;
     nw_regions(hwnd, &tt, &bd, &vx, &hy);
 
@@ -134,6 +148,10 @@ static void nw_layout(HWND hwnd, NoteWin* nw) {
     for (int i = 0; i < NUM_BTNS; i++)
         MoveWindow(nw->btns[i], 0, hy + 1 + i * (side + BTN_GAP),
                    side, side, TRUE);
+
+    for (int i = 0; i < NUM_WBTNS; i++)              /* min, max, close L->R */
+        MoveWindow(nw->wbtns[i], rc.right - (NUM_WBTNS - i) * WINBTN_W, 0,
+                   WINBTN_W, hy, TRUE);
 
     MoveWindow(nw->title, tt.left, tt.top, tt.right - tt.left, tt.bottom - tt.top, TRUE);
     MoveWindow(nw->edit,  bd.left, bd.top, bd.right - bd.left, bd.bottom - bd.top, TRUE);
@@ -164,6 +182,29 @@ static void nw_draw_button(NoteWin* nw, const DRAWITEMSTRUCT* d) {
     RECT r = d->rcItem;
     DrawTextW(d->hDC, txt, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
+    SelectObject(d->hDC, old);
+    DeleteObject(f);
+}
+
+/* Owner-draw a window-chrome button (min/max/close): dark, with the accent (or
+ * red, for close) filling when pressed. Glyph drawn in Segoe UI. */
+static void nw_draw_wbutton(const DRAWITEMSTRUCT* d) {
+    int pressed = (d->itemState & ODS_SELECTED) != 0;
+    COLORREF fill = COL_BG;
+    if (pressed) fill = (d->CtlID == IDW_CLOSE) ? COL_CLOSE : COL_TOGGLE;
+    HBRUSH bg = CreateSolidBrush(fill);
+    FillRect(d->hDC, &d->rcItem, bg);
+    DeleteObject(bg);
+
+    LOGFONTW lf; memset(&lf, 0, sizeof lf);
+    lf.lfHeight = -14; lf.lfWeight = FW_NORMAL; wcscpy(lf.lfFaceName, L"Segoe UI");
+    HFONT f = CreateFontIndirectW(&lf);
+    HFONT old = (HFONT)SelectObject(d->hDC, f);
+    SetBkMode(d->hDC, TRANSPARENT);
+    SetTextColor(d->hDC, RGB(0xe6,0xe6,0xe6));
+    wchar_t txt[8]; GetWindowTextW(d->hwndItem, txt, 8);
+    RECT r = d->rcItem;
+    DrawTextW(d->hDC, txt, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     SelectObject(d->hDC, old);
     DeleteObject(f);
 }
@@ -845,10 +886,21 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 (HMENU)(INT_PTR)btndefs[i].id, cs->hInstance, NULL);
         }
 
+        /* Window-chrome buttons: minimize, maximize, close (— ▢ ✕). */
+        static const struct { int id; const wchar_t* glyph; } wbtndefs[NUM_WBTNS] = {
+            { IDW_MIN, L"\x2013" }, { IDW_MAX, L"\x25A1" }, { IDW_CLOSE, L"\x2715" },
+        };
+        for (int i = 0; i < NUM_WBTNS; i++) {
+            nw->wbtns[i] = CreateWindowExW(0, L"BUTTON", wbtndefs[i].glyph,
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                0, 0, WINBTN_W, TITLEBAR_H, hwnd,
+                (HMENU)(INT_PTR)wbtndefs[i].id, cs->hInstance, NULL);
+        }
+
         /* Title: single-line H1 box (no ES_MULTILINE). */
         nw->title = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            0, 0, 100, TITLE_H, hwnd, (HMENU)ID_TITLE, cs->hInstance, NULL);
+            0, 0, 100, TITLEBAR_H, hwnd, (HMENU)ID_TITLE, cs->hInstance, NULL);
         SendMessageW(nw->title, EM_SETBKGNDCOLOR, 0, (LPARAM)COL_BG);
         SendMessageW(nw->title, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
         nw_style_title(nw->title);
@@ -875,11 +927,44 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         PAINTSTRUCT ps; HDC hdc = BeginPaint(hwnd, &ps);
         RECT rc; GetClientRect(hwnd, &rc);
         int vx, hy; nw_regions(hwnd, NULL, NULL, &vx, &hy);
+        /* qN icon centered in the top-left cell */
+        if (g_app_icon) {
+            int side = (vx < hy ? vx : hy) - 12; if (side < 8) side = 8;
+            int ix = (vx - side) / 2, iy = (hy - side) / 2;
+            DrawIconEx(hdc, ix, iy, g_app_icon, side, side, 0, NULL, DI_NORMAL);
+        }
         RECT vline = { vx, 0, vx + 1, rc.bottom };          /* sidebar | content */
         RECT hline = { 0, hy, rc.right, hy + 1 };           /* full-width divider */
         FillRect(hdc, &vline, g_border_brush);
         FillRect(hdc, &hline, g_border_brush);
         EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_LBUTTONDOWN:                 /* drag the window from the bare title bar */
+        if (GET_Y_LPARAM(lp) < TITLEBAR_H) {
+            ReleaseCapture();
+            SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+            return 0;
+        }
+        return 0;
+    case WM_LBUTTONDBLCLK:               /* double-click title bar: maximize/restore */
+        if (GET_Y_LPARAM(lp) < TITLEBAR_H) {
+            ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+            return 0;
+        }
+        return 0;
+    case WM_GETMINMAXINFO: {             /* keep maximize within the monitor work area */
+        MINMAXINFO* mmi = (MINMAXINFO*)lp;
+        HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi; mi.cbSize = sizeof mi;
+        if (GetMonitorInfoW(mon, &mi)) {
+            mmi->ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left;
+            mmi->ptMaxPosition.y = mi.rcWork.top  - mi.rcMonitor.top;
+            mmi->ptMaxSize.x = mi.rcWork.right - mi.rcWork.left;
+            mmi->ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top;
+        }
+        mmi->ptMinTrackSize.x = 220;
+        mmi->ptMinTrackSize.y = 160;
         return 0;
     }
     case WM_SETFOCUS:
@@ -928,6 +1013,10 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             nw_draw_button(nw, (const DRAWITEMSTRUCT*)lp);
             return TRUE;
         }
+        if (nw && wp >= IDW_MIN && wp <= IDW_CLOSE) {
+            nw_draw_wbutton((const DRAWITEMSTRUCT*)lp);
+            return TRUE;
+        }
         return 0;
     case WM_COMMAND:
         if (HIWORD(wp) == BN_CLICKED && nw) {
@@ -937,6 +1026,9 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             case IDB_STRIKE: nw_wrap_inline(nw, "~~", 2); break;
             case IDB_BULLET: nw_list_prefix(nw, 0);    break;
             case IDB_NUM:    nw_list_prefix(nw, 1);    break;
+            case IDW_MIN:    ShowWindow(hwnd, SW_MINIMIZE); return 0;
+            case IDW_MAX:    ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE); return 0;
+            case IDW_CLOSE:  SendMessageW(hwnd, WM_CLOSE, 0, 0); return 0;
             default: return 0;
             }
             SetFocus(nw->edit);   /* return focus to the body after a click */
@@ -979,8 +1071,9 @@ void note_window_register_class(HINSTANCE hInst) {
     wc.hInstance = hInst;
     wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512)); /* IDC_ARROW */
     wc.hbrBackground = g_bg_brush;     /* dark fill avoids white flash on resize */
-    wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP));   /* qN, title bar + taskbar */
+    wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP));   /* qN, taskbar */
     wc.hIconSm = wc.hIcon;
+    if (!g_app_icon) g_app_icon = wc.hIcon;                  /* painted in top-left cell */
     wc.lpszClassName = NOTE_CLASS;
     RegisterClassExW(&wc);
 }
@@ -991,10 +1084,12 @@ HWND note_window_open(AppState* app, NoteMeta* meta) {
     nw->app = app;
     snprintf(nw->id, sizeof nw->id, "%s", meta->id);
     meta->open = true;
-    /* Standard captioned, resizable window: full-height title bar with
-     * minimize/maximize/close buttons and a taskbar button. */
-    HWND h = CreateWindowExW(0, NOTE_CLASS, L"quickNote",
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+    /* Borderless, resizable window with custom chrome: the title bar (icon,
+     * name, min/max/close) is drawn in the client area. WS_THICKFRAME keeps
+     * resize borders; WS_EX_APPWINDOW keeps a taskbar button. */
+    HWND h = CreateWindowExW(WS_EX_APPWINDOW, NOTE_CLASS, L"quickNote",
+        WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX |
+        WS_CLIPCHILDREN | WS_VISIBLE,
         meta->x, meta->y, meta->w, meta->h,
         NULL, NULL, GetModuleHandleW(NULL), nw);
     if (h) nw_registry_add(nw->id, h);
