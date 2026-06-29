@@ -110,6 +110,17 @@ static void nw_save_content(NoteWin* nw) {
     free(buf);
 }
 
+/* Persist window geometry, but only when the window is in its normal state.
+ * A minimized window's GetWindowRect is (-32000,-32000); a maximized one is
+ * the whole work area. Saving either would lose the user's real placement, so
+ * skip and keep the last good values. */
+static void nw_save_geometry(HWND hwnd, NoteMeta* m) {
+    if (!m || IsIconic(hwnd) || IsZoomed(hwnd)) return;
+    RECT wr; GetWindowRect(hwnd, &wr);
+    m->x = wr.left; m->y = wr.top;
+    m->w = wr.right - wr.left; m->h = wr.bottom - wr.top;
+}
+
 /*
  * nw_set_range_fmt / nw_apply_format — live markdown styling on each debounce tick.
  *
@@ -323,9 +334,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (!nw) return 0;
         NoteMeta* m = nw_meta(nw);
         if (!m) return 0;
-        RECT wr; GetWindowRect(hwnd, &wr);
-        m->x = wr.left; m->y = wr.top;
-        m->w = wr.right - wr.left; m->h = wr.bottom - wr.top;
+        nw_save_geometry(hwnd, m);
         return 0;
     }
     case WM_COMMAND:
@@ -373,10 +382,10 @@ HWND note_window_open(AppState* app, NoteMeta* meta) {
     nw->app = app;
     snprintf(nw->id, sizeof nw->id, "%s", meta->id);
     meta->open = true;
-    /* Native captioned, resizable tool window: real title bar with a close
-     * button, draggable caption, no taskbar button (sticky-note friendly). */
-    HWND h = CreateWindowExW(WS_EX_TOOLWINDOW, NOTE_CLASS, L"Sticky Note",
-        WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_VISIBLE,
+    /* Standard captioned, resizable window: full-height title bar with
+     * minimize/maximize/close buttons and a taskbar button. */
+    HWND h = CreateWindowExW(0, NOTE_CLASS, L"Sticky Note",
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
         meta->x, meta->y, meta->w, meta->h,
         NULL, NULL, GetModuleHandleW(NULL), nw);
     if (h) nw_registry_add(nw->id, h);
@@ -389,9 +398,7 @@ void note_window_close(HWND hwnd) {
     if (nw) {
         NoteMeta* m = nw_meta(nw);
         if (m) {
-            RECT wr; GetWindowRect(hwnd, &wr);
-            m->x = wr.left; m->y = wr.top;
-            m->w = wr.right - wr.left; m->h = wr.bottom - wr.top;
+            nw_save_geometry(hwnd, m);
             nw_save_content(nw);
             m->open = false;
         }
