@@ -103,36 +103,36 @@ HWND note_window_find_open(const char* id) {
     return NULL;
 }
 
-/* Layout geometry. The sidebar hugs the left edge; a single vertical divider
- * separates it from the content column, and a single horizontal divider splits
- * that column into the title (top) and body (below). vx/hy are those divider
- * lines; title/body are the control rects. Any out param may be NULL. */
+/* Layout geometry. Two dividers cross the whole window: a vertical line at
+ * x=SIDEBAR_W and a full-width horizontal line at y=PAD_OUTER+TITLE_H. They make
+ * four quadrants — top-left an empty bordered square, top-right the title,
+ * bottom-left the button sidebar, bottom-right the body. vx/hy are the divider
+ * lines; title/body are control rects. Any out param may be NULL. */
 static void nw_regions(HWND hwnd, RECT* title, RECT* body, int* vx, int* hy) {
     RECT rc; GetClientRect(hwnd, &rc);
-    int v  = SIDEBAR_W + REGION_GAP / 2;            /* vertical divider x */
-    int cl = SIDEBAR_W + REGION_GAP;                /* content left */
+    int v  = SIDEBAR_W;                              /* vertical divider x */
+    int h  = PAD_OUTER + TITLE_H;                    /* horizontal divider y */
+    int cl = v + REGION_GAP;                         /* content left */
     int cr = rc.right - PAD_OUTER; if (cr < cl) cr = cl;
-    int t_top = PAD_OUTER, t_bot = PAD_OUTER + TITLE_H;
-    int h  = t_bot + REGION_GAP / 2;                /* horizontal divider y */
-    int b_top = t_bot + REGION_GAP, b_bot = rc.bottom - PAD_OUTER;
+    int b_top = h + REGION_GAP, b_bot = rc.bottom - PAD_OUTER;
     if (b_bot < b_top) b_bot = b_top;
-    if (title) SetRect(title, cl, t_top, cr, t_bot);
+    if (title) SetRect(title, cl, PAD_OUTER, cr, h - 3);
     if (body)  SetRect(body,  cl, b_top, cr, b_bot);
     if (vx) *vx = v;
     if (hy) *hy = h;
 }
 
-/* Formatting buttons stacked snug against the left edge; title and body fill
- * the content column to the right of the vertical divider. */
+/* Buttons are squares the full sidebar width (up to the vertical divider),
+ * stacked from just below the horizontal divider. Title and body fill the
+ * content column to the right of the vertical divider. */
 static void nw_layout(HWND hwnd, NoteWin* nw) {
-    RECT tt, bd;
-    nw_regions(hwnd, &tt, &bd, NULL, NULL);
+    RECT tt, bd; int vx, hy;
+    nw_regions(hwnd, &tt, &bd, &vx, &hy);
 
-    int bsize = SIDEBAR_W - 4;                      /* square */
-    int bx = (SIDEBAR_W - bsize) / 2;
+    int side = vx;                                   /* square == sidebar width */
     for (int i = 0; i < NUM_BTNS; i++)
-        MoveWindow(nw->btns[i], bx, PAD_OUTER + i * (bsize + BTN_GAP),
-                   bsize, bsize, TRUE);
+        MoveWindow(nw->btns[i], 0, hy + 1 + i * (side + BTN_GAP),
+                   side, side, TRUE);
 
     MoveWindow(nw->title, tt.left, tt.top, tt.right - tt.left, tt.bottom - tt.top, TRUE);
     MoveWindow(nw->edit,  bd.left, bd.top, bd.right - bd.left, bd.bottom - bd.top, TRUE);
@@ -645,6 +645,47 @@ static void nw_list_prefix(NoteWin* nw, int numbered) {
     nw_reformat_now(nw);
 }
 
+/* Enter inside a list item: continue the list. On a non-empty item, insert a
+ * newline plus the next marker ("- " or "N+1. "); on an empty item, remove the
+ * marker to leave the list. Returns 1 if it handled Enter (caller consumes it),
+ * 0 to let RichEdit insert a normal newline. */
+static int nw_handle_enter(NoteWin* nw) {
+    HWND e = nw->edit;
+    CHARRANGE sel; SendMessageW(e, EM_EXGETSEL, 0, (LPARAM)&sel);
+    int len; char* buf = nw_body_text(e, &len);
+    if (!buf) return 0;
+
+    LONG ls = sel.cpMin; if (ls > len) ls = len;
+    while (ls > 0 && buf[ls-1] != '\r' && buf[ls-1] != '\n') ls--;
+    LONG lend = ls; while (lend < len && buf[lend] != '\r' && buf[lend] != '\n') lend++;
+
+    int ml = nw_marker_len(buf, len, ls);
+    if (ml == 0) { free(buf); return 0; }            /* not a list line */
+    int isNum = (buf[ls] >= '0' && buf[ls] <= '9');
+    int hasContent = (lend > ls + ml);
+
+    SendMessageW(e, EM_SETEVENTMASK, 0, 0);
+    if (!hasContent) {                                /* empty item -> leave list */
+        CHARRANGE r = { ls, ls + ml };
+        SendMessageW(e, EM_EXSETSEL, 0, (LPARAM)&r);
+        SendMessageW(e, EM_REPLACESEL, TRUE, (LPARAM)L"");
+    } else {                                          /* continue list */
+        wchar_t ins[24];
+        if (isNum) {
+            int n = 0;
+            for (LONG p = ls; p < ls + ml - 2; p++) n = n * 10 + (buf[p] - '0');
+            swprintf(ins, 24, L"\n%d. ", n + 1);
+        } else {
+            wcscpy(ins, L"\n- ");
+        }
+        SendMessageW(e, EM_REPLACESEL, TRUE, (LPARAM)ins);
+    }
+    free(buf);
+    SendMessageW(e, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
+    nw_reformat_now(nw);
+    return 1;
+}
+
 /* Spawn a new note offset from this one. */
 static void nw_new_note(NoteWin* nw) {
     int ox = 224, oy = 224;
@@ -742,7 +783,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         RECT rc; GetClientRect(hwnd, &rc);
         int vx, hy; nw_regions(hwnd, NULL, NULL, &vx, &hy);
         RECT vline = { vx, 0, vx + 1, rc.bottom };          /* sidebar | content */
-        RECT hline = { vx, hy, rc.right, hy + 1 };          /* title  / body     */
+        RECT hline = { 0, hy, rc.right, hy + 1 };           /* full-width divider */
         FillRect(hdc, &vline, g_border_brush);
         FillRect(hdc, &hline, g_border_brush);
         EndPaint(hwnd, &ps);
@@ -768,6 +809,11 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (hdr->idFrom == ID_TITLE && mf->msg == WM_KEYDOWN &&
                 mf->wParam == VK_RETURN) {
                 SetFocus(nw->edit);
+                return 1;
+            }
+            /* Enter in the body continues a list item, if on one. */
+            if (hdr->idFrom == ID_EDIT && mf->msg == WM_KEYDOWN &&
+                mf->wParam == VK_RETURN && nw_handle_enter(nw)) {
                 return 1;
             }
             return nw_handle_key(nw, hwnd, mf);
