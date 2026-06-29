@@ -37,6 +37,7 @@ static int cb_enter_span(MD_SPANTYPE type, void* detail, void* ud) {
     if (type == MD_SPAN_STRONG) c->stack |= MD_FMT_BOLD;
     else if (type == MD_SPAN_EM) c->stack |= MD_FMT_ITALIC;
     else if (type == MD_SPAN_CODE) c->stack |= MD_FMT_CODE;
+    else if (type == MD_SPAN_DEL) c->stack |= MD_FMT_STRIKE;
     return 0;
 }
 static int cb_leave_span(MD_SPANTYPE type, void* detail, void* ud) {
@@ -44,6 +45,7 @@ static int cb_leave_span(MD_SPANTYPE type, void* detail, void* ud) {
     if (type == MD_SPAN_STRONG) c->stack &= ~MD_FMT_BOLD;
     else if (type == MD_SPAN_EM) c->stack &= ~MD_FMT_ITALIC;
     else if (type == MD_SPAN_CODE) c->stack &= ~MD_FMT_CODE;
+    else if (type == MD_SPAN_DEL) c->stack &= ~MD_FMT_STRIKE;
     return 0;
 }
 static int cb_text(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, void* ud) {
@@ -64,7 +66,7 @@ size_t markdown_spans(const char* text, size_t len, MdSpan* out, size_t out_cap)
     MD_PARSER parser;
     memset(&parser, 0, sizeof parser);
     parser.abi_version = 0;
-    parser.flags = MD_DIALECT_COMMONMARK;
+    parser.flags = MD_DIALECT_COMMONMARK | MD_FLAG_STRIKETHROUGH;
     parser.enter_block = cb_enter_block;
     parser.leave_block = cb_leave_block;
     parser.enter_span  = cb_enter_span;

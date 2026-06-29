@@ -13,11 +13,22 @@
 #define DEBOUNCE_MS  150
 #define IDT_DEBOUNCE 1
 
+/* Formatting sidebar buttons. */
+#define IDB_BOLD     1100
+#define IDB_ITALIC   1101
+#define IDB_STRIKE   1102
+#define IDB_BULLET   1103
+#define IDB_NUM      1104
+#define NUM_BTNS     5
+
 /* Inner padding (px): margin around controls, gap between title and body,
- * and the fixed title-bar height. */
+ * the fixed title-bar height, and the left formatting sidebar. */
 #define PAD_MARGIN   12
 #define PAD_GAP      6
 #define TITLE_H      34
+#define SIDEBAR_W    36
+#define BTN_SIZE     28
+#define BTN_GAP      4
 
 /* Notifications we want from the RichEdit: text changes (for live-format
  * debounce) and key events (for Ctrl+N / Ctrl+Shift+D via EN_MSGFILTER). */
@@ -38,6 +49,7 @@ typedef struct {
     char id[16];               /* note id; resolve NoteMeta* fresh via nw_meta() */
     HWND title;                /* single-line H1 title box; content = note name */
     HWND edit;                 /* multi-line markdown body */
+    HWND btns[NUM_BTNS];       /* formatting sidebar buttons */
 } NoteWin;
 
 static HMODULE g_richedit = NULL;
@@ -86,15 +98,46 @@ HWND note_window_find_open(const char* id) {
     return NULL;
 }
 
-/* Title box across the top, body below, both inset by PAD_MARGIN so text has
- * breathing room on every side. */
+/* Formatting buttons down a left sidebar; title across the top and body below
+ * fill the area to its right, inset by PAD_MARGIN so text has breathing room. */
 static void nw_layout(HWND hwnd, NoteWin* nw) {
     RECT rc; GetClientRect(hwnd, &rc);
-    int innerW = rc.right - 2 * PAD_MARGIN; if (innerW < 0) innerW = 0;
-    MoveWindow(nw->title, PAD_MARGIN, PAD_MARGIN, innerW, TITLE_H, TRUE);
+    int bx = (SIDEBAR_W - BTN_SIZE) / 2;
+    for (int i = 0; i < NUM_BTNS; i++)
+        MoveWindow(nw->btns[i], bx, PAD_MARGIN + i * (BTN_SIZE + BTN_GAP),
+                   BTN_SIZE, BTN_SIZE, TRUE);
+
+    int cx = SIDEBAR_W;
+    int innerW = rc.right - cx - 2 * PAD_MARGIN; if (innerW < 0) innerW = 0;
+    MoveWindow(nw->title, cx + PAD_MARGIN, PAD_MARGIN, innerW, TITLE_H, TRUE);
     int by = PAD_MARGIN + TITLE_H + PAD_GAP;
     int bh = rc.bottom - by - PAD_MARGIN; if (bh < 0) bh = 0;
-    MoveWindow(nw->edit, PAD_MARGIN, by, innerW, bh, TRUE);
+    MoveWindow(nw->edit, cx + PAD_MARGIN, by, innerW, bh, TRUE);
+}
+
+/* Owner-draw a sidebar button: dark fill (lighter when pressed) and a glyph
+ * rendered in the style it applies (bold B, italic I, struck-through S). */
+static void nw_draw_button(const DRAWITEMSTRUCT* d) {
+    int pressed = (d->itemState & ODS_SELECTED) != 0;
+    HBRUSH bg = CreateSolidBrush(pressed ? RGB(0x3a,0x3a,0x42) : RGB(0x2a,0x2a,0x30));
+    FillRect(d->hDC, &d->rcItem, bg);
+    DeleteObject(bg);
+
+    LOGFONTW lf; memset(&lf, 0, sizeof lf);
+    lf.lfHeight = -16; lf.lfWeight = FW_BOLD; wcscpy(lf.lfFaceName, L"Segoe UI");
+    if (d->CtlID == IDB_ITALIC) lf.lfItalic = TRUE;
+    if (d->CtlID == IDB_STRIKE) lf.lfStrikeOut = TRUE;
+    HFONT f = CreateFontIndirectW(&lf);
+    HFONT old = (HFONT)SelectObject(d->hDC, f);
+
+    SetBkMode(d->hDC, TRANSPARENT);
+    SetTextColor(d->hDC, RGB(0xe6,0xe6,0xe6));
+    wchar_t txt[8]; GetWindowTextW(d->hwndItem, txt, 8);
+    RECT r = d->rcItem;
+    DrawTextW(d->hDC, txt, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    SelectObject(d->hDC, old);
+    DeleteObject(f);
 }
 
 /* Style the whole title box (and its default for new input) as a dark H1. */
@@ -252,6 +295,14 @@ static void nw_apply_hidden(HWND edit, const char* buf, int len, const MdSpan* s
         while (j < (size_t)len && cnt < want && (buf[j] == '*' || buf[j] == '_')) { j++; cnt++; }
         nw_hide_range(edit, b, (size_t)cnt);
     }
+    if (f & MD_FMT_STRIKE) {                 /* ~~ on each side */
+        size_t i = a; int cnt = 0;
+        while (i > 0 && cnt < 2 && buf[i-1] == '~') { i--; cnt++; }
+        nw_hide_range(edit, a - (size_t)cnt, (size_t)cnt);
+        size_t j = b; cnt = 0;
+        while (j < (size_t)len && cnt < 2 && buf[j] == '~') { j++; cnt++; }
+        nw_hide_range(edit, b, (size_t)cnt);
+    }
 }
 
 static void nw_set_range_fmt(HWND edit, size_t start, size_t len, MdFmt fmt) {
@@ -262,7 +313,7 @@ static void nw_set_range_fmt(HWND edit, size_t start, size_t len, MdFmt fmt) {
     CHARFORMAT2W cf; memset(&cf, 0, sizeof cf); cf.cbSize = sizeof cf;
     /* include CFM_HIDDEN (effect bit off) so content is always shown, even if a
      * prior pass had hidden these positions. */
-    cf.dwMask = CFM_BOLD | CFM_ITALIC | CFM_SIZE | CFM_FACE | CFM_COLOR | CFM_HIDDEN;
+    cf.dwMask = CFM_BOLD | CFM_ITALIC | CFM_STRIKEOUT | CFM_SIZE | CFM_FACE | CFM_COLOR | CFM_HIDDEN;
     cf.crTextColor = COL_TEXT;
     cf.yHeight = 200;                       /* 10pt default (twips) */
     if (fmt & MD_FMT_H1) cf.yHeight = 360;
@@ -271,11 +322,56 @@ static void nw_set_range_fmt(HWND edit, size_t start, size_t len, MdFmt fmt) {
     if (fmt & (MD_FMT_BOLD | MD_FMT_H1 | MD_FMT_H2 | MD_FMT_H3))
         cf.dwEffects |= CFE_BOLD;
     if (fmt & MD_FMT_ITALIC) cf.dwEffects |= CFE_ITALIC;
+    if (fmt & MD_FMT_STRIKE) cf.dwEffects |= CFE_STRIKEOUT;
     if (fmt & MD_FMT_CODE) wcscpy(cf.szFaceName, L"Consolas");
     else wcscpy(cf.szFaceName, L"Segoe UI");
     SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
 
     SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&saved);  /* restore caret */
+}
+
+/* Render markdown list lines: every paragraph starting with "- " or "N. " gets
+ * its literal marker hidden and a real RichEdit bullet/number with a hanging
+ * indent. Non-list paragraphs have numbering cleared, so un-listing a line
+ * reverts cleanly. Runs each reformat (events already muted by the caller). */
+static void nw_apply_lists(HWND edit, const char* buf, int len) {
+    size_t i = 0;
+    for (;;) {
+        size_t ls = i, le = ls;
+        while (le < (size_t)len && buf[le] != '\r' && buf[le] != '\n') le++;
+
+        WORD numbering = 0;          /* 0 none, else PFN_BULLET / PFN_ARABIC */
+        size_t mend = ls;            /* end of literal marker to hide */
+        if (ls + 1 < le && buf[ls] == '-' && buf[ls+1] == ' ') {
+            numbering = PFN_BULLET; mend = ls + 2;
+        } else {
+            size_t q = ls;
+            while (q < le && buf[q] >= '0' && buf[q] <= '9') q++;
+            if (q > ls && q + 1 < le && buf[q] == '.' && buf[q+1] == ' ') {
+                numbering = PFN_ARABIC; mend = q + 2;
+            }
+        }
+
+        CHARRANGE r = { (LONG)ls, (LONG)le };
+        SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&r);
+        PARAFORMAT2 pf; memset(&pf, 0, sizeof pf); pf.cbSize = sizeof pf;
+        pf.dwMask = PFM_NUMBERING | PFM_NUMBERINGSTYLE | PFM_NUMBERINGTAB
+                  | PFM_OFFSET | PFM_STARTINDENT;
+        if (numbering) {
+            pf.wNumbering = numbering;
+            pf.wNumberingStyle = (numbering == PFN_ARABIC) ? PFNS_PERIOD : PFNS_PLAIN;
+            pf.wNumberingTab = 280;
+            pf.dxStartIndent = 280;
+            pf.dxOffset = 280;       /* hanging indent for wrapped lines */
+        }
+        SendMessageW(edit, EM_SETPARAFORMAT, 0, (LPARAM)&pf);
+        if (numbering) nw_hide_range(edit, ls, mend - ls);
+
+        if (le >= (size_t)len) break;
+        i = le;
+        if (i < (size_t)len && buf[i] == '\r') i++;
+        if (i < (size_t)len && buf[i] == '\n') i++;
+    }
 }
 
 static void nw_apply_format(NoteWin* nw) {
@@ -306,7 +402,7 @@ static void nw_apply_format(NoteWin* nw) {
     CHARFORMAT2W base; memset(&base, 0, sizeof base); base.cbSize = sizeof base;
     /* CFM_HIDDEN (effect off) un-hides everything so deleted/moved markers
      * reappear before we re-hide the current ones. */
-    base.dwMask = CFM_BOLD|CFM_ITALIC|CFM_SIZE|CFM_FACE|CFM_COLOR|CFM_HIDDEN;
+    base.dwMask = CFM_BOLD|CFM_ITALIC|CFM_STRIKEOUT|CFM_SIZE|CFM_FACE|CFM_COLOR|CFM_HIDDEN;
     base.yHeight = 200; base.crTextColor = COL_TEXT; wcscpy(base.szFaceName, L"Segoe UI");
     SendMessageW(nw->edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&base);
 
@@ -317,6 +413,7 @@ static void nw_apply_format(NoteWin* nw) {
         nw_set_range_fmt(nw->edit, spans[i].start, spans[i].len, spans[i].fmt);
         nw_apply_hidden(nw->edit, buf, len, &spans[i]);   /* consume markers */
     }
+    nw_apply_lists(nw->edit, buf, len);     /* render "- "/"N. " as bullets/numbers */
     free(buf);
 
     /* restore the real caret/selection */
@@ -324,6 +421,141 @@ static void nw_apply_format(NoteWin* nw) {
 
     /* re-enable change + key notifications now that the restyle is done */
     SendMessageW(nw->edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
+}
+
+/* Read the body as RichEdit-indexed text (\r breaks, CP_ACP); caller frees.
+ * *out_len gets the length (0 for empty). Returns NULL only on OOM. */
+static char* nw_body_text(HWND edit, int* out_len) {
+    GETTEXTLENGTHEX gtl; gtl.flags = GTL_DEFAULT; gtl.codepage = CP_ACP;
+    int len = (int)SendMessageW(edit, EM_GETTEXTLENGTHEX, (WPARAM)&gtl, 0);
+    if (len < 0) len = 0;
+    char* buf = malloc((size_t)len + 1);
+    if (!buf) { *out_len = 0; return NULL; }
+    if (len > 0) {
+        GETTEXTEX gte; gte.cb = (DWORD)(len + 1); gte.flags = GT_DEFAULT;
+        gte.codepage = CP_ACP; gte.lpDefaultChar = NULL; gte.lpUsedDefChar = NULL;
+        SendMessageW(edit, EM_GETTEXTEX, (WPARAM)&gte, (LPARAM)buf);
+    } else buf[0] = '\0';
+    *out_len = len;
+    return buf;
+}
+
+/* Persist + restyle the body now (used after a programmatic edit), with redraw
+ * suppressed to avoid flicker. */
+static void nw_reformat_now(NoteWin* nw) {
+    SendMessageW(nw->edit, WM_SETREDRAW, FALSE, 0);
+    nw_save_content(nw);
+    nw_apply_format(nw);
+    SendMessageW(nw->edit, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(nw->edit, NULL, TRUE);
+}
+
+/* Length of a list marker at position p ("- " or "N. "), else 0. */
+static int nw_marker_len(const char* buf, int len, LONG p) {
+    if (p + 1 < len && buf[p] == '-' && buf[p+1] == ' ') return 2;
+    LONG q = p; while (q < len && buf[q] >= '0' && buf[q] <= '9') q++;
+    if (q > p && q + 1 < len && buf[q] == '.' && buf[q+1] == ' ')
+        return (int)(q - p) + 2;
+    return 0;
+}
+
+/* Toggle inline emphasis around the body selection by inserting/removing a
+ * markdown marker ("**", "*", "~~"). If the selection is already wrapped in the
+ * marker it is unwrapped; otherwise it is wrapped (with no selection, the caret
+ * lands between the markers). The live formatter then renders + hides them. */
+static void nw_wrap_inline(NoteWin* nw, const char* marker) {
+    HWND e = nw->edit;
+    int mlen = (int)strlen(marker);
+    wchar_t wmark[8];
+    for (int k = 0; k < mlen; k++) wmark[k] = (wchar_t)marker[k];
+    wmark[mlen] = 0;
+
+    SendMessageW(e, EM_SETEVENTMASK, 0, 0);   /* mute; we reformat explicitly */
+    CHARRANGE sel; SendMessageW(e, EM_EXGETSEL, 0, (LPARAM)&sel);
+    LONG a = sel.cpMin, b = sel.cpMax;
+    int len; char* buf = nw_body_text(e, &len);
+    if (!buf) { SendMessageW(e, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK); return; }
+    int wrapped = (a >= mlen && b + mlen <= len &&
+                   memcmp(buf + a - mlen, marker, (size_t)mlen) == 0 &&
+                   memcmp(buf + b, marker, (size_t)mlen) == 0);
+    free(buf);
+
+    if (wrapped) {
+        CHARRANGE r1 = { b, b + mlen };           /* delete trailing first */
+        SendMessageW(e, EM_EXSETSEL, 0, (LPARAM)&r1);
+        SendMessageW(e, EM_REPLACESEL, TRUE, (LPARAM)L"");
+        CHARRANGE r2 = { a - mlen, a };           /* then leading */
+        SendMessageW(e, EM_EXSETSEL, 0, (LPARAM)&r2);
+        SendMessageW(e, EM_REPLACESEL, TRUE, (LPARAM)L"");
+        CHARRANGE ns = { a - mlen, b - mlen };
+        SendMessageW(e, EM_EXSETSEL, 0, (LPARAM)&ns);
+    } else {
+        CHARRANGE r1 = { b, b };                  /* insert end marker first */
+        SendMessageW(e, EM_EXSETSEL, 0, (LPARAM)&r1);
+        SendMessageW(e, EM_REPLACESEL, TRUE, (LPARAM)wmark);
+        CHARRANGE r2 = { a, a };                  /* then start marker */
+        SendMessageW(e, EM_EXSETSEL, 0, (LPARAM)&r2);
+        SendMessageW(e, EM_REPLACESEL, TRUE, (LPARAM)wmark);
+        CHARRANGE ns = { a + mlen, b + mlen };    /* reselect original text */
+        SendMessageW(e, EM_EXSETSEL, 0, (LPARAM)&ns);
+    }
+
+    SendMessageW(e, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
+    nw_reformat_now(nw);
+}
+
+/* Toggle a list prefix on every body line touched by the selection. Bullet uses
+ * "- ", numbered uses "N. " (renumbered 1..k). If the first line already has the
+ * requested kind it is removed from all lines; otherwise it is added (converting
+ * the other kind in place). The live formatter turns markers into bullets. */
+static void nw_list_prefix(NoteWin* nw, int numbered) {
+    HWND e = nw->edit;
+    SendMessageW(e, EM_SETEVENTMASK, 0, 0);
+    CHARRANGE sel; SendMessageW(e, EM_EXGETSEL, 0, (LPARAM)&sel);
+    int len; char* buf = nw_body_text(e, &len);
+    if (!buf) { SendMessageW(e, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK); return; }
+    LONG a = sel.cpMin, b = sel.cpMax;
+
+    LONG ls = a;                                  /* start of line containing a */
+    while (ls > 0 && buf[ls-1] != '\r' && buf[ls-1] != '\n') ls--;
+
+    LONG starts[256]; int ns = 0;                 /* line starts in [ls, b] */
+    for (LONG p = ls;;) {
+        if (ns < 256) starts[ns++] = p;
+        LONG q = p; while (q < len && buf[q] != '\r' && buf[q] != '\n') q++;
+        if (q >= len) break;
+        if (buf[q] == '\r') q++;
+        if (q < len && buf[q] == '\n') q++;
+        if (q > b) break;
+        p = q;
+    }
+
+    int firstMl = nw_marker_len(buf, len, starts[0]);
+    int firstBullet = (firstMl == 2 && buf[starts[0]] == '-');
+    int firstNum = (firstMl > 0 && buf[starts[0]] >= '0' && buf[starts[0]] <= '9');
+    int remove = numbered ? firstNum : firstBullet;
+
+    for (int i = ns - 1; i >= 0; i--) {           /* last->first keeps offsets valid */
+        LONG p = starts[i];
+        int ml = nw_marker_len(buf, len, p);
+        wchar_t ins[16];
+        if (remove) {
+            if (ml == 0) continue;
+            CHARRANGE r = { p, p + ml };
+            SendMessageW(e, EM_EXSETSEL, 0, (LPARAM)&r);
+            SendMessageW(e, EM_REPLACESEL, TRUE, (LPARAM)L"");
+        } else {
+            if (numbered) swprintf(ins, 16, L"%d. ", i + 1);
+            else wcscpy(ins, L"- ");
+            CHARRANGE r = { p, p + ml };          /* replaces any existing marker */
+            SendMessageW(e, EM_EXSETSEL, 0, (LPARAM)&r);
+            SendMessageW(e, EM_REPLACESEL, TRUE, (LPARAM)ins);
+        }
+    }
+    free(buf);
+
+    SendMessageW(e, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
+    nw_reformat_now(nw);
 }
 
 /* Spawn a new note offset from this one. */
@@ -346,8 +578,10 @@ static void nw_delete_note(NoteWin* nw, HWND hwnd) {
     app_delete_note(app, id);
 }
 
-/* Handle Ctrl+N / Ctrl+Shift+D forwarded from the RichEdit via EN_MSGFILTER.
- * Returns nonzero if the keystroke was consumed (so the control ignores it). */
+/* Handle shortcuts forwarded from a RichEdit via EN_MSGFILTER. Returns nonzero
+ * if the keystroke was consumed (so the control ignores it). Global shortcuts
+ * (new/delete) work from either box; formatting shortcuts apply to the body
+ * only and consume the key so RichEdit's built-in Ctrl+B/I don't also fire. */
 static LRESULT nw_handle_key(NoteWin* nw, HWND hwnd, const MSGFILTER* mf) {
     if (mf->msg != WM_KEYDOWN) return 0;
     BOOL ctrl  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -355,6 +589,14 @@ static LRESULT nw_handle_key(NoteWin* nw, HWND hwnd, const MSGFILTER* mf) {
     if (!ctrl) return 0;
     if (mf->wParam == 'N' && !shift) { nw_new_note(nw); return 1; }
     if (mf->wParam == 'D' && shift)  { nw_delete_note(nw, hwnd); return 1; }
+
+    if (mf->nmhdr.idFrom == ID_EDIT) {
+        if (mf->wParam == 'B' && !shift) { nw_wrap_inline(nw, "**"); return 1; }
+        if (mf->wParam == 'I' && !shift) { nw_wrap_inline(nw, "*");  return 1; }
+        if (mf->wParam == 'X' && shift)  { nw_wrap_inline(nw, "~~"); return 1; }
+        if (mf->wParam == '8' && shift)  { nw_list_prefix(nw, 0);    return 1; }
+        if (mf->wParam == '7' && shift)  { nw_list_prefix(nw, 1);    return 1; }
+    }
     return 0;
 }
 
@@ -369,6 +611,18 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         /* Dark native title bar (best-effort; ignored on older Windows). */
         BOOL dark = TRUE;
         DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof dark);
+
+        /* Formatting sidebar: owner-drawn buttons (so they paint dark). */
+        static const struct { int id; const wchar_t* glyph; } btndefs[NUM_BTNS] = {
+            { IDB_BOLD, L"B" }, { IDB_ITALIC, L"I" }, { IDB_STRIKE, L"S" },
+            { IDB_BULLET, L"\x2022" }, { IDB_NUM, L"1." },
+        };
+        for (int i = 0; i < NUM_BTNS; i++) {
+            nw->btns[i] = CreateWindowExW(0, L"BUTTON", btndefs[i].glyph,
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                0, 0, BTN_SIZE, BTN_SIZE, hwnd,
+                (HMENU)(INT_PTR)btndefs[i].id, cs->hInstance, NULL);
+        }
 
         /* Title: single-line H1 box (no ES_MULTILINE). */
         nw->title = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
@@ -423,7 +677,25 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         nw_save_geometry(hwnd, m);
         return 0;
     }
+    case WM_DRAWITEM:
+        if (wp >= IDB_BOLD && wp <= IDB_NUM) {
+            nw_draw_button((const DRAWITEMSTRUCT*)lp);
+            return TRUE;
+        }
+        return 0;
     case WM_COMMAND:
+        if (HIWORD(wp) == BN_CLICKED && nw) {
+            switch (LOWORD(wp)) {
+            case IDB_BOLD:   nw_wrap_inline(nw, "**"); break;
+            case IDB_ITALIC: nw_wrap_inline(nw, "*");  break;
+            case IDB_STRIKE: nw_wrap_inline(nw, "~~"); break;
+            case IDB_BULLET: nw_list_prefix(nw, 0);    break;
+            case IDB_NUM:    nw_list_prefix(nw, 1);    break;
+            default: return 0;
+            }
+            SetFocus(nw->edit);   /* return focus to the body after a click */
+            return 0;
+        }
         if (HIWORD(wp) == EN_CHANGE &&
             (LOWORD(wp) == ID_EDIT || LOWORD(wp) == ID_TITLE)) {
             SetTimer(hwnd, IDT_DEBOUNCE, DEBOUNCE_MS, NULL);  /* coalesces */

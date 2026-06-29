@@ -35,6 +35,16 @@ void test_markdown(void) {
         CHECK(s[0].len == 1);
     }
 
+    /* "~~gone~~" -> one STRIKE span over "gone" at offset 2, len 4 */
+    {
+        const char* t = "~~gone~~";
+        size_t n = markdown_spans(t, strlen(t), s, 32);
+        CHECK(n == 1);
+        CHECK(s[0].fmt == MD_FMT_STRIKE);
+        CHECK(s[0].start == 2);
+        CHECK(s[0].len == 4);
+    }
+
     /* plain text -> no spans */
     {
         const char* t = "just words";

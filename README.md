@@ -28,9 +28,21 @@ Stored under `%APPDATA%\StickyNotes\`:
   are named `Untitled N`. Press Enter in the title to jump to the body.
 - **Ctrl+N**: new note. **Ctrl+Shift+D**: delete the note permanently (confirms first).
 - Tray menu shows note names (New Note, reopen a note, Quit).
-- Markdown is rendered live as you type (headings, **bold**, *italic*, `code`).
-  The delimiter characters are hidden (`**bold**` shows as bold) but kept in the
-  file, so the `.md` stays plain Markdown on disk.
+- Markdown is rendered live as you type (headings, **bold**, *italic*,
+  ~~strikethrough~~, `code`, bullet/numbered lists). Delimiters are hidden
+  (`**bold**` shows as bold) but kept in the file, so the `.md` stays plain
+  Markdown on disk.
+- A formatting **sidebar** (left edge) toggles styles on the selection:
+
+  | Button | Action | Shortcut |
+  |--------|--------|----------|
+  | **B**  | Bold `**…**`       | Ctrl+B |
+  | *I*    | Italic `*…*`       | Ctrl+I |
+  | ~~S~~  | Strikethrough `~~…~~` | Ctrl+Shift+X |
+  | •      | Bullet list `- `   | Ctrl+Shift+8 |
+  | 1.     | Numbered list `N. `| Ctrl+Shift+7 |
+
+  Each button toggles: applying again on already-formatted text removes it.
 
 ## Tech
 
