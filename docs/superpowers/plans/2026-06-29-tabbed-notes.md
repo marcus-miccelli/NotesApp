@@ -94,14 +94,19 @@ void test_prefs(void) {
     strcpy(m->color, "amber");
     strcpy(m->name, "Hello");
 
-    /* window CRUD */
+    /* window CRUD (in-memory; reload round-trip is verified in Task 2) */
     WinMeta* w = prefs_add_window(&p, "w0001");
     CHECK(w != NULL);
     CHECK(p.wcount == 1);
-    w->x = 10; w->y = 20; w->w = 300; w->h = 400;
-    w->ntabs = 1; strcpy(w->tabs[0], "a1b2c3"); w->active = 0;
     CHECK(prefs_find_window(&p, "w0001") == w);
     CHECK(prefs_find_window(&p, "nope") == NULL);
+    CHECK(prefs_remove_window(&p, "w0001"));
+    CHECK(p.wcount == 0);
+    /* re-add so the saved file carries a window for the Task 2 round-trip */
+    w = prefs_add_window(&p, "w0001");
+    CHECK(w != NULL);
+    w->x = 10; w->y = 20; w->w = 300; w->h = 400;
+    w->ntabs = 1; strcpy(w->tabs[0], "a1b2c3"); w->active = 0;
 
     const char* path = "C:\\tmp\\sntest_prefs.json";
     CHECK(prefs_save(&p, path));
@@ -116,14 +121,7 @@ void test_prefs(void) {
     CHECK_STR(r->color, "amber");
     CHECK_STR(r->name, "Hello");
 
-    WinMeta* rw = prefs_find_window(&q, "w0001");
-    CHECK(rw != NULL);
-    CHECK(rw->x == 10 && rw->y == 20 && rw->w == 300 && rw->h == 400);
-    CHECK(rw->ntabs == 1 && rw->active == 0);
-    CHECK_STR(rw->tabs[0], "a1b2c3");
-
-    CHECK(prefs_remove_window(&q, "w0001"));
-    CHECK(q.wcount == 0);
+    /* NOTE: window-reload asserts are added in Task 2 (persistence lands there) */
     CHECK(prefs_remove(&q, "a1b2c3"));
     CHECK(q.count == 0);
     prefs_free(&q);
@@ -305,12 +303,22 @@ git commit -m "$(printf 'feat(prefs): slim NoteMeta + window structs + window CR
 - Consumes: `WinMeta`, `Prefs.windows` from Task 1.
 - Produces: JSON with top-level `"windows"` array; `prefs_save` writes `"version": 2`.
 
-- [ ] **Step 1: Confirm the round-trip test fails**
+- [ ] **Step 1: Add the window-reload asserts (failing)**
 
-The Task-1 test already saves a window and reloads it. With Task-1's stripped save/load (no window serialization), `prefs_find_window(&q, "w0001")` returns NULL after reload.
+In `tests/test_prefs.c`, add window round-trip checks after the note-reload checks (right after `CHECK_STR(r->name, "Hello");` and before the `prefs_remove(&q, "a1b2c3")` line):
+
+```c
+    WinMeta* rw = prefs_find_window(&q, "w0001");
+    CHECK(rw != NULL);
+    CHECK(rw->x == 10 && rw->y == 20 && rw->w == 300 && rw->h == 400);
+    CHECK(rw->ntabs == 1 && rw->active == 0);
+    CHECK_STR(rw->tabs[0], "a1b2c3");
+    CHECK(prefs_remove_window(&q, "w0001"));
+    CHECK(q.wcount == 0);
+```
 
 Run: `make test`
-Expected: FAIL at `CHECK(rw != NULL)` in `test_prefs`.
+Expected: FAIL at `CHECK(rw != NULL)` — Task-1 save/load does not serialize windows yet.
 
 - [ ] **Step 2: Implement save**
 
@@ -1116,7 +1124,7 @@ git commit -m "$(printf 'feat(ui): render Windows-Terminal-style tab strip + hit
 - Modify: `src/note_window.c`
 
 **Interfaces:**
-- Consumes: `nw_tab_hit`, `app_new_note`, `app_apply_format_edit`.
+- Consumes: `nw_tab_hit`, `app_new_note`, `nw_apply_format_edit`.
 - Produces:
   - `static void nw_add_tab(NoteWin* nw, HWND hwnd);` — new note as a new tab, becomes active.
   - `static void nw_activate(NoteWin* nw, HWND hwnd, int i);` — show tab i, hide previous.
