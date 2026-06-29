@@ -21,14 +21,15 @@
 #define IDB_NUM      1104
 #define NUM_BTNS     5
 
-/* Inner padding (px): margin around controls, gap between title and body,
- * the fixed title-bar height, and the left formatting sidebar. */
-#define PAD_MARGIN   12
-#define PAD_GAP      6
-#define TITLE_H      34
-#define SIDEBAR_W    36
-#define BTN_SIZE     28
-#define BTN_GAP      4
+/* Layout (px). Three bordered boxes — sidebar, title, body — sit inside the
+ * client area with an outer pad and a gap between them; each control is inset
+ * a little inside its box so the border shows and text has padding. */
+#define PAD_OUTER    8     /* client edge -> boxes */
+#define REGION_GAP   8     /* between boxes */
+#define SIDEBAR_W    30    /* sidebar box width (buttons are this wide, square) */
+#define TITLE_H      30    /* title box height */
+#define CINSET       4     /* control inset inside its box */
+#define BTN_GAP      3     /* between sidebar buttons */
 
 /* Notifications we want from the RichEdit: text changes (for live-format
  * debounce) and key events (for Ctrl+N / Ctrl+Shift+D via EN_MSGFILTER). */
@@ -41,8 +42,10 @@
 #endif
 
 /* Dark palette */
-static const COLORREF COL_BG   = RGB(0x1e, 0x1e, 0x22);
-static const COLORREF COL_TEXT = RGB(0xe6, 0xe6, 0xe6);
+static const COLORREF COL_BG     = RGB(0x1e, 0x1e, 0x22);
+static const COLORREF COL_TEXT   = RGB(0xe6, 0xe6, 0xe6);
+static const COLORREF COL_BORDER = RGB(0x44, 0x44, 0x4e);  /* region outlines */
+static const COLORREF COL_TOGGLE = RGB(0x3a, 0x3a, 0x46);  /* pressed button fill */
 
 typedef struct {
     AppState* app;
@@ -53,7 +56,8 @@ typedef struct {
 } NoteWin;
 
 static HMODULE g_richedit = NULL;
-static HBRUSH  g_bg_brush = NULL;   /* class background, dark; created once */
+static HBRUSH  g_bg_brush = NULL;     /* class background, dark; created once */
+static HBRUSH  g_border_brush = NULL; /* region outline; created once */
 
 static NoteWin* nw_get(HWND h) { return (NoteWin*)GetWindowLongPtrW(h, GWLP_USERDATA); }
 
@@ -98,28 +102,45 @@ HWND note_window_find_open(const char* id) {
     return NULL;
 }
 
-/* Formatting buttons down a left sidebar; title across the top and body below
- * fill the area to its right, inset by PAD_MARGIN so text has breathing room. */
-static void nw_layout(HWND hwnd, NoteWin* nw) {
+/* Compute the three bordered boxes from the client rect. Any of the out params
+ * may be NULL. The content column (title/body) starts to the right of the
+ * sidebar box. */
+static void nw_regions(HWND hwnd, RECT* sidebar, RECT* title, RECT* body) {
     RECT rc; GetClientRect(hwnd, &rc);
-    int bx = (SIDEBAR_W - BTN_SIZE) / 2;
-    for (int i = 0; i < NUM_BTNS; i++)
-        MoveWindow(nw->btns[i], bx, PAD_MARGIN + i * (BTN_SIZE + BTN_GAP),
-                   BTN_SIZE, BTN_SIZE, TRUE);
-
-    int cx = SIDEBAR_W;
-    int innerW = rc.right - cx - 2 * PAD_MARGIN; if (innerW < 0) innerW = 0;
-    MoveWindow(nw->title, cx + PAD_MARGIN, PAD_MARGIN, innerW, TITLE_H, TRUE);
-    int by = PAD_MARGIN + TITLE_H + PAD_GAP;
-    int bh = rc.bottom - by - PAD_MARGIN; if (bh < 0) bh = 0;
-    MoveWindow(nw->edit, cx + PAD_MARGIN, by, innerW, bh, TRUE);
+    int sb_l = PAD_OUTER, sb_r = PAD_OUTER + SIDEBAR_W;
+    int cx_l = sb_r + REGION_GAP, cx_r = rc.right - PAD_OUTER;
+    if (cx_r < cx_l) cx_r = cx_l;
+    int t_top = PAD_OUTER, t_bot = PAD_OUTER + TITLE_H;
+    int b_top = t_bot + REGION_GAP, b_bot = rc.bottom - PAD_OUTER;
+    if (b_bot < b_top) b_bot = b_top;
+    if (sidebar) { SetRect(sidebar, sb_l, PAD_OUTER, sb_r, b_bot); }
+    if (title)   { SetRect(title,   cx_l, t_top, cx_r, t_bot); }
+    if (body)    { SetRect(body,    cx_l, b_top, cx_r, b_bot); }
 }
 
-/* Owner-draw a sidebar button: dark fill (lighter when pressed) and a glyph
+/* Formatting buttons stacked snug in the sidebar box; title and body controls
+ * inset CINSET inside their boxes so the border shows and text has padding. */
+static void nw_layout(HWND hwnd, NoteWin* nw) {
+    RECT sb, tt, bd;
+    nw_regions(hwnd, &sb, &tt, &bd);
+
+    int bsize = sb.right - sb.left - 2;      /* square, just inside the border */
+    for (int i = 0; i < NUM_BTNS; i++)
+        MoveWindow(nw->btns[i], sb.left + 1, sb.top + 1 + i * (bsize + BTN_GAP),
+                   bsize, bsize, TRUE);
+
+    MoveWindow(nw->title, tt.left + CINSET, tt.top + CINSET,
+               tt.right - tt.left - 2 * CINSET, tt.bottom - tt.top - 2 * CINSET, TRUE);
+    MoveWindow(nw->edit, bd.left + CINSET, bd.top + CINSET,
+               bd.right - bd.left - 2 * CINSET, bd.bottom - bd.top - 2 * CINSET, TRUE);
+}
+
+/* Owner-draw a sidebar button: blends with the dark sidebar (no distinct fill)
+ * until pressed, when the square fills with the toggle accent. The glyph is
  * rendered in the style it applies (bold B, italic I, struck-through S). */
 static void nw_draw_button(const DRAWITEMSTRUCT* d) {
     int pressed = (d->itemState & ODS_SELECTED) != 0;
-    HBRUSH bg = CreateSolidBrush(pressed ? RGB(0x3a,0x3a,0x42) : RGB(0x2a,0x2a,0x30));
+    HBRUSH bg = CreateSolidBrush(pressed ? COL_TOGGLE : COL_BG);
     FillRect(d->hDC, &d->rcItem, bg);
     DeleteObject(bg);
 
@@ -620,7 +641,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         for (int i = 0; i < NUM_BTNS; i++) {
             nw->btns[i] = CreateWindowExW(0, L"BUTTON", btndefs[i].glyph,
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                0, 0, BTN_SIZE, BTN_SIZE, hwnd,
+                0, 0, SIDEBAR_W, SIDEBAR_W, hwnd,   /* real size set in nw_layout */
                 (HMENU)(INT_PTR)btndefs[i].id, cs->hInstance, NULL);
         }
 
@@ -647,8 +668,17 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_SIZE:
-        if (nw) nw_layout(hwnd, nw);
+        if (nw) { nw_layout(hwnd, nw); InvalidateRect(hwnd, NULL, TRUE); }
         return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT ps; HDC hdc = BeginPaint(hwnd, &ps);
+        RECT sb, tt, bd; nw_regions(hwnd, &sb, &tt, &bd);
+        FrameRect(hdc, &sb, g_border_brush);
+        FrameRect(hdc, &tt, g_border_brush);
+        FrameRect(hdc, &bd, g_border_brush);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
     case WM_SETFOCUS:
         if (nw) SetFocus(nw->edit);   /* keep focus on the editor */
         return 0;
@@ -725,6 +755,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 void note_window_register_class(HINSTANCE hInst) {
     if (!g_richedit) g_richedit = LoadLibraryW(L"Msftedit.dll");
     if (!g_bg_brush) g_bg_brush = CreateSolidBrush(COL_BG);
+    if (!g_border_brush) g_border_brush = CreateSolidBrush(COL_BORDER);
     WNDCLASSEXW wc; memset(&wc, 0, sizeof wc);
     wc.cbSize = sizeof wc;
     wc.lpfnWndProc = nw_proc;
