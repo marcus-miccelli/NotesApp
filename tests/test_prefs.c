@@ -44,7 +44,14 @@ void test_prefs(void) {
     CHECK_STR(r->color, "amber");
     CHECK_STR(r->name, "Hello");
 
-    /* NOTE: window-reload asserts are added in Task 2 (persistence lands there) */
+    WinMeta* rw = prefs_find_window(&q, "w0001");
+    CHECK(rw != NULL);
+    CHECK(rw->x == 10 && rw->y == 20 && rw->w == 300 && rw->h == 400);
+    CHECK(rw->ntabs == 1 && rw->active == 0);
+    CHECK_STR(rw->tabs[0], "a1b2c3");
+    CHECK(prefs_remove_window(&q, "w0001"));
+    CHECK(q.wcount == 0);
+
     CHECK(prefs_remove(&q, "a1b2c3"));
     CHECK(q.count == 0);
     prefs_free(&q);

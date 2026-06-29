@@ -132,14 +132,40 @@ bool prefs_load(Prefs* p, const char* json_path) {
         copy_str(m->name, sizeof m->name, json_str(it, "name", ""), "");
         copy_str(m->color, sizeof m->color, json_str(it, "color", "slate"), "slate");
     }
+
+    const cJSON* warr = cJSON_GetObjectItemCaseSensitive(root, "windows");
+    const cJSON* wit = NULL;
+    cJSON_ArrayForEach(wit, warr) {
+        const char* id = json_str(wit, "id", NULL);
+        if (!id) continue;
+        WinMeta* w = prefs_add_window(p, id);
+        if (!w) break;
+        w->x = json_int(wit, "x", 200);
+        w->y = json_int(wit, "y", 200);
+        w->w = json_int(wit, "w", 480);
+        w->h = json_int(wit, "h", 360);
+        w->active = json_int(wit, "active", 0);
+        const cJSON* tabs = cJSON_GetObjectItemCaseSensitive(wit, "tabs");
+        const cJSON* tit = NULL;
+        w->ntabs = 0;
+        cJSON_ArrayForEach(tit, tabs) {
+            if (w->ntabs >= WIN_MAX_TABS) break;
+            if (cJSON_IsString(tit) && tit->valuestring)
+                copy_str(w->tabs[w->ntabs++], sizeof w->tabs[0], tit->valuestring, "");
+        }
+        if (w->active >= w->ntabs) w->active = w->ntabs ? w->ntabs - 1 : 0;
+    }
+    /* migration for v1 files happens in Task 3, inserted here */
+
     cJSON_Delete(root);
     return true;
 }
 
 bool prefs_save(const Prefs* p, const char* json_path) {
     cJSON* root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "version", p->version);
+    cJSON_AddNumberToObject(root, "version", 2);
     cJSON_AddStringToObject(root, "theme", p->theme);
+
     cJSON* arr = cJSON_AddArrayToObject(root, "notes");
     for (size_t i = 0; i < p->count; i++) {
         const NoteMeta* m = &p->notes[i];
@@ -150,6 +176,23 @@ bool prefs_save(const Prefs* p, const char* json_path) {
         cJSON_AddStringToObject(o, "color", m->color);
         cJSON_AddItemToArray(arr, o);
     }
+
+    cJSON* warr = cJSON_AddArrayToObject(root, "windows");
+    for (size_t i = 0; i < p->wcount; i++) {
+        const WinMeta* w = &p->windows[i];
+        cJSON* o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "id", w->id);
+        cJSON_AddNumberToObject(o, "x", w->x);
+        cJSON_AddNumberToObject(o, "y", w->y);
+        cJSON_AddNumberToObject(o, "w", w->w);
+        cJSON_AddNumberToObject(o, "h", w->h);
+        cJSON_AddNumberToObject(o, "active", w->active);
+        cJSON* tabs = cJSON_AddArrayToObject(o, "tabs");
+        for (int t = 0; t < w->ntabs; t++)
+            cJSON_AddItemToArray(tabs, cJSON_CreateString(w->tabs[t]));
+        cJSON_AddItemToArray(warr, o);
+    }
+
     char* text = cJSON_Print(root);
     cJSON_Delete(root);
     if (!text) return false;
