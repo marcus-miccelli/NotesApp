@@ -1,27 +1,28 @@
-# Sticky Notes
+# quickNote
 
-Native Windows sticky-note app in C. Each note is a borderless dark-mode
-window editing a Markdown `.md` file. Open notes and their positions are
-restored on launch.
+Native Windows sticky-note app in C. Each note is a dark-mode window editing a
+Markdown `.md` file. Open notes and their positions are restored on launch.
 
 ## Build
 
-Requires MinGW-w64 (gcc) and GNU Make.
+Requires MinGW-w64 (gcc + windres) and GNU Make.
 
-    make app      # builds stickynotes.exe
+    make app      # builds quicknote.exe
     make test     # builds and runs the headless unit tests
     make clean
 
+The app icon ("qN") is built from `assets/quicknote.ico` via `assets/app.rc`.
+
 ## Data
 
-Stored under `%APPDATA%\StickyNotes\`:
+Stored under `%APPDATA%\quickNote\`:
 - `notes\<id>.md` — one markdown file per note; the title is its leading
   `# <title>` H1, the rest is the body
 - `preferences.json` — note name, open state, window geometry, color, theme
 
 ## Usage
 
-- Run `stickynotes.exe`. A tray icon manages notes.
+- Run `quicknote.exe`. A tray icon manages notes.
 - Each note is a dark native window with a standard title bar (minimize,
   maximize, close); the **X** closes it (keeps the file).
 - A note has a **title box** (styled as Heading 1) above the body; new notes

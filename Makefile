@@ -1,4 +1,5 @@
 CC      := gcc
+WINDRES := windres
 # -MMD -MP emit per-object .d files so edits to a header recompile every .c
 # that includes it (without this, e.g. growing a struct in a shared header
 # silently mismatches sizeof across translation units).
@@ -17,6 +18,7 @@ $(shell mkdir -p $(BUILD_TMP))
 # GUI app sources (added to as tasks land)
 APP_SRC := src/main.c src/note_window.c src/tray.c
 APP_OBJ := $(APP_SRC:.c=.o)
+RES_OBJ := assets/app_res.o   # compiled .rc (app icon)
 
 # Pure-logic sources compiled into the test binary (added to as tasks land)
 LOGIC_SRC := src/paths.c src/store.c src/prefs.c third_party/cjson/cJSON.c src/markdown.c third_party/md4c/md4c.c src/app.c
@@ -28,9 +30,14 @@ all: app
 
 LOGIC_OBJ := $(LOGIC_SRC:.c=.o)
 
-app: stickynotes.exe
-stickynotes.exe: $(APP_OBJ) $(LOGIC_OBJ)
+app: quicknote.exe
+quicknote.exe: $(APP_OBJ) $(LOGIC_OBJ) $(RES_OBJ)
 	$(CC) $(CFLAGS) -mwindows -o $@ $^ $(LDLIBS)
+
+# Resource (app icon). windres resolves the ICON path relative to the .rc dir
+# and #includes via -I.
+$(RES_OBJ): assets/app.rc assets/quicknote.ico src/resource.h
+	$(WINDRES) -Isrc -Iassets -o $@ assets/app.rc
 
 test: tests.exe
 	./tests.exe
@@ -44,4 +51,4 @@ DEPS := $(APP_OBJ:.o=.d) $(TEST_OBJ:.o=.d)
 -include $(DEPS)
 
 clean:
-	rm -f stickynotes.exe tests.exe $(APP_OBJ) $(TEST_OBJ) $(DEPS)
+	rm -f quicknote.exe stickynotes.exe tests.exe $(APP_OBJ) $(TEST_OBJ) $(RES_OBJ) $(DEPS)

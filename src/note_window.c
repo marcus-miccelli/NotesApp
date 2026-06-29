@@ -1,6 +1,7 @@
 #include "note_window.h"
 #include "store.h"
 #include "markdown.h"
+#include "resource.h"
 #include <richedit.h>
 #include <dwmapi.h>
 #include <stdio.h>
@@ -307,7 +308,7 @@ static void nw_load_content(NoteWin* nw) {
     nw_style_title(nw->title);
     SetWindowTextA(nw->edit, body);
     snprintf(m->name, sizeof m->name, "%s", tshow ? tshow : "");
-    SetWindowTextA(GetParent(nw->title), m->name[0] ? m->name : "Sticky Note");
+    SetWindowTextA(GetParent(nw->title), m->name[0] ? m->name : "quickNote");
     free(title);
     free(txt);
 }
@@ -336,7 +337,7 @@ static void nw_save_content(NoteWin* nw) {
     store_write_note(path, buf, off);
 
     snprintf(m->name, sizeof m->name, "%s", t);
-    SetWindowTextA(GetParent(nw->title), m->name[0] ? m->name : "Sticky Note");
+    SetWindowTextA(GetParent(nw->title), m->name[0] ? m->name : "quickNote");
     free(buf); free(b); free(t);
 }
 
@@ -978,6 +979,8 @@ void note_window_register_class(HINSTANCE hInst) {
     wc.hInstance = hInst;
     wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512)); /* IDC_ARROW */
     wc.hbrBackground = g_bg_brush;     /* dark fill avoids white flash on resize */
+    wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP));   /* qN, title bar + taskbar */
+    wc.hIconSm = wc.hIcon;
     wc.lpszClassName = NOTE_CLASS;
     RegisterClassExW(&wc);
 }
@@ -990,7 +993,7 @@ HWND note_window_open(AppState* app, NoteMeta* meta) {
     meta->open = true;
     /* Standard captioned, resizable window: full-height title bar with
      * minimize/maximize/close buttons and a taskbar button. */
-    HWND h = CreateWindowExW(0, NOTE_CLASS, L"Sticky Note",
+    HWND h = CreateWindowExW(0, NOTE_CLASS, L"quickNote",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
         meta->x, meta->y, meta->w, meta->h,
         NULL, NULL, GetModuleHandleW(NULL), nw);

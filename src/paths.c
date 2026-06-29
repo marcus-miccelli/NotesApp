@@ -14,7 +14,7 @@ bool paths_resolve(Paths* out, const char* root_override) {
         if (!appdata) return false;
         snprintf(root, sizeof root, "%s", appdata);
     }
-    snprintf(out->base,  sizeof out->base,  "%s\\StickyNotes", root);
+    snprintf(out->base,  sizeof out->base,  "%s\\quickNote", root);
     snprintf(out->notes, sizeof out->notes, "%s\\notes", out->base);
     snprintf(out->prefs, sizeof out->prefs, "%s\\preferences.json", out->base);
     return true;

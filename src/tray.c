@@ -1,5 +1,6 @@
 #include "tray.h"
 #include "note_window.h"
+#include "resource.h"
 #include <shellapi.h>
 #include <string.h>
 #include <wchar.h>
@@ -77,8 +78,9 @@ bool tray_init(AppState* app, HINSTANCE hInst) {
     s_nid.uID = TRAY_UID;
     s_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     s_nid.uCallbackMessage = WM_TRAY;
-    s_nid.hIcon = LoadIconW(NULL, MAKEINTRESOURCEW(32512)); /* IDI_APPLICATION */
-    wcscpy(s_nid.szTip, L"Sticky Notes");
+    s_nid.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP)); /* qN */
+    if (!s_nid.hIcon) s_nid.hIcon = LoadIconW(NULL, MAKEINTRESOURCEW(32512));
+    wcscpy(s_nid.szTip, L"quickNote");
     if (!Shell_NotifyIconW(NIM_ADD, &s_nid)) {
         DestroyWindow(s_owner);
         s_owner = NULL;
