@@ -26,14 +26,14 @@
  * a little inside its box so the border shows and text has padding. */
 #define PAD_OUTER    8     /* client edge -> boxes */
 #define REGION_GAP   8     /* between boxes */
-#define SIDEBAR_W    30    /* sidebar box width (buttons are this wide, square) */
+#define SIDEBAR_W    30    /* sidebar width (buttons are ~this wide, square) */
 #define TITLE_H      30    /* title box height */
-#define CINSET       4     /* control inset inside its box */
 #define BTN_GAP      3     /* between sidebar buttons */
 
 /* Notifications we want from the RichEdit: text changes (for live-format
- * debounce) and key events (for Ctrl+N / Ctrl+Shift+D via EN_MSGFILTER). */
-#define EDIT_EVENT_MASK (ENM_CHANGE | ENM_KEYEVENTS)
+ * debounce), key events (shortcuts via EN_MSGFILTER), and selection changes
+ * (to keep the sidebar toggle highlights in sync with the caret). */
+#define EDIT_EVENT_MASK (ENM_CHANGE | ENM_KEYEVENTS | ENM_SELCHANGE)
 
 /* DWM dark title bar. Attribute 20 = DWMWA_USE_IMMERSIVE_DARK_MODE on
  * Windows 10 2004+ (older insider builds used 19). */
@@ -53,6 +53,7 @@ typedef struct {
     HWND title;                /* single-line H1 title box; content = note name */
     HWND edit;                 /* multi-line markdown body */
     HWND btns[NUM_BTNS];       /* formatting sidebar buttons */
+    int  active[NUM_BTNS];     /* which formats apply at the caret (highlight) */
 } NoteWin;
 
 static HMODULE g_richedit = NULL;
@@ -102,45 +103,50 @@ HWND note_window_find_open(const char* id) {
     return NULL;
 }
 
-/* Compute the three bordered boxes from the client rect. Any of the out params
- * may be NULL. The content column (title/body) starts to the right of the
- * sidebar box. */
-static void nw_regions(HWND hwnd, RECT* sidebar, RECT* title, RECT* body) {
+/* Layout geometry. The sidebar hugs the left edge; a single vertical divider
+ * separates it from the content column, and a single horizontal divider splits
+ * that column into the title (top) and body (below). vx/hy are those divider
+ * lines; title/body are the control rects. Any out param may be NULL. */
+static void nw_regions(HWND hwnd, RECT* title, RECT* body, int* vx, int* hy) {
     RECT rc; GetClientRect(hwnd, &rc);
-    int sb_l = PAD_OUTER, sb_r = PAD_OUTER + SIDEBAR_W;
-    int cx_l = sb_r + REGION_GAP, cx_r = rc.right - PAD_OUTER;
-    if (cx_r < cx_l) cx_r = cx_l;
+    int v  = SIDEBAR_W + REGION_GAP / 2;            /* vertical divider x */
+    int cl = SIDEBAR_W + REGION_GAP;                /* content left */
+    int cr = rc.right - PAD_OUTER; if (cr < cl) cr = cl;
     int t_top = PAD_OUTER, t_bot = PAD_OUTER + TITLE_H;
+    int h  = t_bot + REGION_GAP / 2;                /* horizontal divider y */
     int b_top = t_bot + REGION_GAP, b_bot = rc.bottom - PAD_OUTER;
     if (b_bot < b_top) b_bot = b_top;
-    if (sidebar) { SetRect(sidebar, sb_l, PAD_OUTER, sb_r, b_bot); }
-    if (title)   { SetRect(title,   cx_l, t_top, cx_r, t_bot); }
-    if (body)    { SetRect(body,    cx_l, b_top, cx_r, b_bot); }
+    if (title) SetRect(title, cl, t_top, cr, t_bot);
+    if (body)  SetRect(body,  cl, b_top, cr, b_bot);
+    if (vx) *vx = v;
+    if (hy) *hy = h;
 }
 
-/* Formatting buttons stacked snug in the sidebar box; title and body controls
- * inset CINSET inside their boxes so the border shows and text has padding. */
+/* Formatting buttons stacked snug against the left edge; title and body fill
+ * the content column to the right of the vertical divider. */
 static void nw_layout(HWND hwnd, NoteWin* nw) {
-    RECT sb, tt, bd;
-    nw_regions(hwnd, &sb, &tt, &bd);
+    RECT tt, bd;
+    nw_regions(hwnd, &tt, &bd, NULL, NULL);
 
-    int bsize = sb.right - sb.left - 2;      /* square, just inside the border */
+    int bsize = SIDEBAR_W - 4;                      /* square */
+    int bx = (SIDEBAR_W - bsize) / 2;
     for (int i = 0; i < NUM_BTNS; i++)
-        MoveWindow(nw->btns[i], sb.left + 1, sb.top + 1 + i * (bsize + BTN_GAP),
+        MoveWindow(nw->btns[i], bx, PAD_OUTER + i * (bsize + BTN_GAP),
                    bsize, bsize, TRUE);
 
-    MoveWindow(nw->title, tt.left + CINSET, tt.top + CINSET,
-               tt.right - tt.left - 2 * CINSET, tt.bottom - tt.top - 2 * CINSET, TRUE);
-    MoveWindow(nw->edit, bd.left + CINSET, bd.top + CINSET,
-               bd.right - bd.left - 2 * CINSET, bd.bottom - bd.top - 2 * CINSET, TRUE);
+    MoveWindow(nw->title, tt.left, tt.top, tt.right - tt.left, tt.bottom - tt.top, TRUE);
+    MoveWindow(nw->edit,  bd.left, bd.top, bd.right - bd.left, bd.bottom - bd.top, TRUE);
 }
 
 /* Owner-draw a sidebar button: blends with the dark sidebar (no distinct fill)
- * until pressed, when the square fills with the toggle accent. The glyph is
- * rendered in the style it applies (bold B, italic I, struck-through S). */
-static void nw_draw_button(const DRAWITEMSTRUCT* d) {
-    int pressed = (d->itemState & ODS_SELECTED) != 0;
-    HBRUSH bg = CreateSolidBrush(pressed ? COL_TOGGLE : COL_BG);
+ * until it is pressed or its format is active at the caret, when the square
+ * fills with the toggle accent. The glyph is rendered in the style it applies
+ * (bold B, italic I, struck-through S). */
+static void nw_draw_button(NoteWin* nw, const DRAWITEMSTRUCT* d) {
+    int idx = (int)d->CtlID - IDB_BOLD;
+    int on = (d->itemState & ODS_SELECTED) != 0 ||
+             (idx >= 0 && idx < NUM_BTNS && nw->active[idx]);
+    HBRUSH bg = CreateSolidBrush(on ? COL_TOGGLE : COL_BG);
     FillRect(d->hDC, &d->rcItem, bg);
     DeleteObject(bg);
 
@@ -159,6 +165,32 @@ static void nw_draw_button(const DRAWITEMSTRUCT* d) {
 
     SelectObject(d->hDC, old);
     DeleteObject(f);
+}
+
+/* Recompute which formats apply at the body caret/selection and repaint any
+ * button whose highlight changed. Inline styles come from the character format,
+ * lists from the paragraph numbering. */
+static void nw_update_toggles(NoteWin* nw) {
+    int s[NUM_BTNS] = { 0 };
+    CHARFORMAT2W cf; memset(&cf, 0, sizeof cf); cf.cbSize = sizeof cf;
+    cf.dwMask = CFM_BOLD | CFM_ITALIC | CFM_STRIKEOUT;
+    SendMessageW(nw->edit, EM_GETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+    s[0] = (cf.dwMask & CFM_BOLD)     && (cf.dwEffects & CFE_BOLD);
+    s[1] = (cf.dwMask & CFM_ITALIC)   && (cf.dwEffects & CFE_ITALIC);
+    s[2] = (cf.dwMask & CFM_STRIKEOUT)&& (cf.dwEffects & CFE_STRIKEOUT);
+
+    PARAFORMAT2 pf; memset(&pf, 0, sizeof pf); pf.cbSize = sizeof pf;
+    pf.dwMask = PFM_NUMBERING;
+    SendMessageW(nw->edit, EM_GETPARAFORMAT, 0, (LPARAM)&pf);
+    s[3] = (pf.wNumbering == PFN_BULLET);
+    s[4] = (pf.wNumbering == PFN_ARABIC);
+
+    for (int i = 0; i < NUM_BTNS; i++) {
+        if (s[i] != nw->active[i]) {
+            nw->active[i] = s[i];
+            InvalidateRect(nw->btns[i], NULL, TRUE);
+        }
+    }
 }
 
 /* Style the whole title box (and its default for new input) as a dark H1. */
@@ -469,6 +501,7 @@ static void nw_reformat_now(NoteWin* nw) {
     nw_apply_format(nw);
     SendMessageW(nw->edit, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(nw->edit, NULL, TRUE);
+    nw_update_toggles(nw);    /* apply_format muted EN_SELCHANGE; refresh now */
 }
 
 /* Length of a list marker at position p ("- " or "N. "), else 0. */
@@ -664,6 +697,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SendMessageW(nw->edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
         nw_load_content(nw);
         nw_layout(hwnd, nw);
+        nw_update_toggles(nw);
         SetFocus(nw->edit);
         return 0;
     }
@@ -672,10 +706,12 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC hdc = BeginPaint(hwnd, &ps);
-        RECT sb, tt, bd; nw_regions(hwnd, &sb, &tt, &bd);
-        FrameRect(hdc, &sb, g_border_brush);
-        FrameRect(hdc, &tt, g_border_brush);
-        FrameRect(hdc, &bd, g_border_brush);
+        RECT rc; GetClientRect(hwnd, &rc);
+        int vx, hy; nw_regions(hwnd, NULL, NULL, &vx, &hy);
+        RECT vline = { vx, 0, vx + 1, rc.bottom };          /* sidebar | content */
+        RECT hline = { vx, hy, rc.right, hy + 1 };          /* title  / body     */
+        FillRect(hdc, &vline, g_border_brush);
+        FillRect(hdc, &hline, g_border_brush);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -684,6 +720,10 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_NOTIFY: {
         NMHDR* hdr = (NMHDR*)lp;
+        if (nw && hdr->code == EN_SELCHANGE && hdr->idFrom == ID_EDIT) {
+            nw_update_toggles(nw);
+            return 0;
+        }
         if (nw && hdr->code == EN_MSGFILTER &&
             (hdr->idFrom == ID_EDIT || hdr->idFrom == ID_TITLE)) {
             MSGFILTER* mf = (MSGFILTER*)lp;
@@ -708,8 +748,8 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_DRAWITEM:
-        if (wp >= IDB_BOLD && wp <= IDB_NUM) {
-            nw_draw_button((const DRAWITEMSTRUCT*)lp);
+        if (nw && wp >= IDB_BOLD && wp <= IDB_NUM) {
+            nw_draw_button(nw, (const DRAWITEMSTRUCT*)lp);
             return TRUE;
         }
         return 0;
@@ -739,6 +779,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             nw_apply_format(nw);
             SendMessageW(nw->edit, WM_SETREDRAW, TRUE, 0);
             InvalidateRect(nw->edit, NULL, TRUE);
+            nw_update_toggles(nw);
         }
         return 0;
     case WM_DESTROY:
