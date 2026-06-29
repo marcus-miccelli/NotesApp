@@ -21,11 +21,14 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show) {
 
     if (!tray_init(&app, hInst)) return 1;
 
+    /* Plain dispatch — no IsDialogMessage. The note window is not a dialog;
+     * IsDialogMessage would treat Enter as a default-button press and swallow
+     * it before the multiline body could insert a newline. Shortcuts are
+     * handled via the RichEdit EN_MSGFILTER, not accelerators. */
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
-        if (!IsDialogMessageW(GetActiveWindow(), &msg)) {
-            TranslateMessage(&msg); DispatchMessageW(&msg);
-        }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
     }
 
     tray_shutdown();
