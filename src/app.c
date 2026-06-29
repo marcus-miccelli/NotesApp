@@ -31,12 +31,24 @@ bool app_note_path(const AppState* a, const NoteMeta* m, char* out, size_t outsz
     return true;
 }
 
+/* Next "Untitled N": one past the highest N already in use among note names. */
+static int app_next_untitled(const AppState* a) {
+    int max = 0;
+    for (size_t i = 0; i < a->prefs.count; i++) {
+        int n = 0;
+        if (sscanf(a->prefs.notes[i].name, "Untitled %d", &n) == 1 && n > max)
+            max = n;
+    }
+    return max + 1;
+}
+
 NoteMeta* app_new_note(AppState* a) {
     char id[16], file[24];
     app_gen_id(id);
     snprintf(file, sizeof file, "%s.md", id);
     NoteMeta* m = prefs_add_note(&a->prefs, id, file);
     if (!m) return NULL;
+    snprintf(m->name, sizeof m->name, "Untitled %d", app_next_untitled(a));
     char path[260];
     app_note_path(a, m, path, sizeof path);
     if (!store_write_note(path, "", 0)) {  /* create empty file */

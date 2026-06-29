@@ -9,8 +9,15 @@
 
 #define NOTE_CLASS   L"StickyNoteWindow"
 #define ID_EDIT      1001
+#define ID_TITLE     1002
 #define DEBOUNCE_MS  150
 #define IDT_DEBOUNCE 1
+
+/* Inner padding (px): margin around controls, gap between title and body,
+ * and the fixed title-bar height. */
+#define PAD_MARGIN   12
+#define PAD_GAP      6
+#define TITLE_H      34
 
 /* Notifications we want from the RichEdit: text changes (for live-format
  * debounce) and key events (for Ctrl+N / Ctrl+Shift+D via EN_MSGFILTER). */
@@ -29,7 +36,8 @@ static const COLORREF COL_TEXT = RGB(0xe6, 0xe6, 0xe6);
 typedef struct {
     AppState* app;
     char id[16];               /* note id; resolve NoteMeta* fresh via nw_meta() */
-    HWND edit;
+    HWND title;                /* single-line H1 title box; content = note name */
+    HWND edit;                 /* multi-line markdown body */
 } NoteWin;
 
 static HMODULE g_richedit = NULL;
@@ -78,36 +86,97 @@ HWND note_window_find_open(const char* id) {
     return NULL;
 }
 
-/* The RichEdit fills the entire client area (the native title bar provides the
- * window chrome now). */
+/* Title box across the top, body below, both inset by PAD_MARGIN so text has
+ * breathing room on every side. */
 static void nw_layout(HWND hwnd, NoteWin* nw) {
     RECT rc; GetClientRect(hwnd, &rc);
-    MoveWindow(nw->edit, 0, 0, rc.right, rc.bottom, TRUE);
+    int innerW = rc.right - 2 * PAD_MARGIN; if (innerW < 0) innerW = 0;
+    MoveWindow(nw->title, PAD_MARGIN, PAD_MARGIN, innerW, TITLE_H, TRUE);
+    int by = PAD_MARGIN + TITLE_H + PAD_GAP;
+    int bh = rc.bottom - by - PAD_MARGIN; if (bh < 0) bh = 0;
+    MoveWindow(nw->edit, PAD_MARGIN, by, innerW, bh, TRUE);
 }
 
+/* Style the whole title box (and its default for new input) as a dark H1. */
+static void nw_style_title(HWND title) {
+    CHARRANGE all = { 0, -1 };
+    SendMessageW(title, EM_EXSETSEL, 0, (LPARAM)&all);
+    CHARFORMAT2W cf; memset(&cf, 0, sizeof cf); cf.cbSize = sizeof cf;
+    cf.dwMask = CFM_BOLD | CFM_SIZE | CFM_FACE | CFM_COLOR;
+    cf.dwEffects = CFE_BOLD;
+    cf.yHeight = 360;                 /* ~18pt H1 */
+    cf.crTextColor = COL_TEXT;
+    wcscpy(cf.szFaceName, L"Segoe UI");
+    SendMessageW(title, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
+    CHARRANGE caret = { 0, 0 };
+    SendMessageW(title, EM_EXSETSEL, 0, (LPARAM)&caret);
+}
+
+/* The .md is "# <title>\n\n<body>": the first line's H1 is the note title, the
+ * rest is the body. Split on load so each goes to its own control. If there is
+ * no leading H1 (legacy/empty file), the whole file is body and the title falls
+ * back to the persisted note name. */
 static void nw_load_content(NoteWin* nw) {
     NoteMeta* m = nw_meta(nw);
     if (!m) return;
     char path[260];
     app_note_path(nw->app, m, path, sizeof path);
     char* txt = NULL; size_t n = 0;
+    char* title = NULL;
+    const char* body = "";
     if (store_read_note(path, &txt, &n)) {
-        SetWindowTextA(nw->edit, txt);   /* RichEdit accepts ANSI text */
-        free(txt);
+        body = txt;
+        if (n >= 2 && txt[0] == '#' && txt[1] == ' ') {
+            size_t i = 2;
+            while (i < n && txt[i] != '\n' && txt[i] != '\r') i++;
+            size_t tlen = i - 2;
+            title = malloc(tlen + 1);
+            if (title) { memcpy(title, txt + 2, tlen); title[tlen] = '\0'; }
+            if (i < n && txt[i] == '\r') i++;
+            if (i < n && txt[i] == '\n') i++;
+            /* skip a single blank separator line after the title */
+            size_t j = i;
+            if (j < n && txt[j] == '\r') j++;
+            if (j < n && txt[j] == '\n') i = j + 1;
+            body = txt + i;
+        }
     }
+    const char* tshow = (title && title[0]) ? title : m->name;
+    SetWindowTextA(nw->title, tshow ? tshow : "");
+    nw_style_title(nw->title);
+    SetWindowTextA(nw->edit, body);
+    snprintf(m->name, sizeof m->name, "%s", tshow ? tshow : "");
+    SetWindowTextA(GetParent(nw->title), m->name[0] ? m->name : "Sticky Note");
+    free(title);
+    free(txt);
 }
 
 static void nw_save_content(NoteWin* nw) {
     NoteMeta* m = nw_meta(nw);
     if (!m) return;
-    int len = GetWindowTextLengthA(nw->edit);
-    char* buf = malloc((size_t)len + 1);
-    if (!buf) return;
-    GetWindowTextA(nw->edit, buf, len + 1);
+    int tl = GetWindowTextLengthA(nw->title);
+    int bl = GetWindowTextLengthA(nw->edit);
+    char* t = malloc((size_t)tl + 1); if (!t) return;
+    char* b = malloc((size_t)bl + 1); if (!b) { free(t); return; }
+    GetWindowTextA(nw->title, t, tl + 1);
+    GetWindowTextA(nw->edit, b, bl + 1);
+    /* title is single-line; neutralize any stray break just in case */
+    for (char* p = t; *p; ++p) if (*p == '\r' || *p == '\n') *p = ' ';
+
+    size_t need = (tl > 0 ? (size_t)tl + 4 : 0) + (size_t)bl + 1;  /* "# " + t + "\n\n" + body */
+    char* buf = malloc(need);
+    if (!buf) { free(t); free(b); return; }
+    size_t off = 0;
+    if (tl > 0) off += (size_t)sprintf(buf + off, "# %s\n\n", t);
+    memcpy(buf + off, b, (size_t)bl); off += (size_t)bl;
+
     char path[260];
     app_note_path(nw->app, m, path, sizeof path);
-    store_write_note(path, buf, (size_t)len);
-    free(buf);
+    store_write_note(path, buf, off);
+
+    snprintf(m->name, sizeof m->name, "%s", t);
+    SetWindowTextA(GetParent(nw->title), m->name[0] ? m->name : "Sticky Note");
+    free(buf); free(b); free(t);
 }
 
 /* Persist window geometry, but only when the window is in its normal state.
@@ -301,6 +370,14 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         BOOL dark = TRUE;
         DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof dark);
 
+        /* Title: single-line H1 box (no ES_MULTILINE). */
+        nw->title = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            0, 0, 100, TITLE_H, hwnd, (HMENU)ID_TITLE, cs->hInstance, NULL);
+        SendMessageW(nw->title, EM_SETBKGNDCOLOR, 0, (LPARAM)COL_BG);
+        SendMessageW(nw->title, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
+        nw_style_title(nw->title);
+
         nw->edit = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
             0, 0, 100, 100, hwnd, (HMENU)ID_EDIT, cs->hInstance, NULL);
@@ -323,8 +400,17 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_NOTIFY: {
         NMHDR* hdr = (NMHDR*)lp;
-        if (nw && hdr->idFrom == ID_EDIT && hdr->code == EN_MSGFILTER)
-            return nw_handle_key(nw, hwnd, (MSGFILTER*)lp);
+        if (nw && hdr->code == EN_MSGFILTER &&
+            (hdr->idFrom == ID_EDIT || hdr->idFrom == ID_TITLE)) {
+            MSGFILTER* mf = (MSGFILTER*)lp;
+            /* Enter in the title moves to the body instead of being eaten. */
+            if (hdr->idFrom == ID_TITLE && mf->msg == WM_KEYDOWN &&
+                mf->wParam == VK_RETURN) {
+                SetFocus(nw->edit);
+                return 1;
+            }
+            return nw_handle_key(nw, hwnd, mf);
+        }
         return 0;
     }
     case WM_CLOSE:                     /* native title-bar X */
@@ -338,7 +424,8 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_COMMAND:
-        if (HIWORD(wp) == EN_CHANGE && LOWORD(wp) == ID_EDIT) {
+        if (HIWORD(wp) == EN_CHANGE &&
+            (LOWORD(wp) == ID_EDIT || LOWORD(wp) == ID_TITLE)) {
             SetTimer(hwnd, IDT_DEBOUNCE, DEBOUNCE_MS, NULL);  /* coalesces */
         }
         return 0;

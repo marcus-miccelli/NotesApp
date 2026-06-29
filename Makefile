@@ -1,5 +1,8 @@
 CC      := gcc
-CFLAGS  := -std=c11 -Wall -Wextra -O2 -Isrc -Ithird_party/md4c -Ithird_party/cjson
+# -MMD -MP emit per-object .d files so edits to a header recompile every .c
+# that includes it (without this, e.g. growing a struct in a shared header
+# silently mismatches sizeof across translation units).
+CFLAGS  := -std=c11 -Wall -Wextra -O2 -MMD -MP -Isrc -Ithird_party/md4c -Ithird_party/cjson
 LDLIBS  := -lgdi32 -lcomctl32 -lole32 -lshell32 -ldwmapi
 
 # Build-temp fix: cc1/collect2 need a writable temp dir, obtained via the
@@ -37,5 +40,8 @@ tests.exe: $(TEST_OBJ)
 %.o: %.c
 	$(CC) $(CFLAGS) -Itests -c -o $@ $<
 
+DEPS := $(APP_OBJ:.o=.d) $(TEST_OBJ:.o=.d)
+-include $(DEPS)
+
 clean:
-	rm -f stickynotes.exe tests.exe $(APP_OBJ) $(TEST_OBJ)
+	rm -f stickynotes.exe tests.exe $(APP_OBJ) $(TEST_OBJ) $(DEPS)

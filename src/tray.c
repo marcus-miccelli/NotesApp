@@ -20,9 +20,10 @@ static void tray_show_menu(HWND hwnd) {
     AppendMenuW(m, MF_STRING, IDM_NEW, L"New Note");
     if (s_app->prefs.count > 0) AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     for (size_t i = 0; i < s_app->prefs.count; i++) {
-        wchar_t label[64];
+        wchar_t label[96];
         const NoteMeta* nm = &s_app->prefs.notes[i];
-        swprintf(label, 64, L"%hs%s", nm->id, nm->open ? L"  (open)" : L"");
+        const char* disp = nm->name[0] ? nm->name : nm->id;
+        swprintf(label, 96, L"%hs%s", disp, nm->open ? L"  (open)" : L"");
         AppendMenuW(m, MF_STRING, IDM_NOTE0 + (UINT)i, label);
     }
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);

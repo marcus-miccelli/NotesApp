@@ -15,16 +15,19 @@ Requires MinGW-w64 (gcc) and GNU Make.
 ## Data
 
 Stored under `%APPDATA%\StickyNotes\`:
-- `notes\<id>.md` — one markdown file per note (pure content)
-- `preferences.json` — open state, window geometry, color, theme
+- `notes\<id>.md` — one markdown file per note; the title is its leading
+  `# <title>` H1, the rest is the body
+- `preferences.json` — note name, open state, window geometry, color, theme
 
 ## Usage
 
 - Run `stickynotes.exe`. A tray icon manages notes.
 - Each note is a dark native window with a standard title bar (minimize,
   maximize, close); the **X** closes it (keeps the file).
+- A note has a **title box** (styled as Heading 1) above the body; new notes
+  are named `Untitled N`. Press Enter in the title to jump to the body.
 - **Ctrl+N**: new note. **Ctrl+Shift+D**: delete the note permanently (confirms first).
-- Tray menu: New Note, reopen a note, Quit.
+- Tray menu shows note names (New Note, reopen a note, Quit).
 - Markdown is rendered live as you type (headings, **bold**, *italic*, `code`).
   The delimiter characters are hidden (`**bold**` shows as bold) but kept in the
   file, so the `.md` stays plain Markdown on disk.

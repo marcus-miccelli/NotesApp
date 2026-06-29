@@ -107,6 +107,7 @@ bool prefs_load(Prefs* p, const char* json_path) {
         m->y = json_int(it, "y", 200);
         m->w = json_int(it, "w", 280);
         m->h = json_int(it, "h", 320);
+        copy_str(m->name, sizeof m->name, json_str(it, "name", ""), "");
         copy_str(m->color, sizeof m->color, json_str(it, "color", "slate"), "slate");
         m->open = json_bool(it, "open", true);
     }
@@ -124,6 +125,7 @@ bool prefs_save(const Prefs* p, const char* json_path) {
         cJSON* o = cJSON_CreateObject();
         cJSON_AddStringToObject(o, "id", m->id);
         cJSON_AddStringToObject(o, "file", m->file);
+        cJSON_AddStringToObject(o, "name", m->name);
         cJSON_AddNumberToObject(o, "x", m->x);
         cJSON_AddNumberToObject(o, "y", m->y);
         cJSON_AddNumberToObject(o, "w", m->w);

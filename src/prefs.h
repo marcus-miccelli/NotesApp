@@ -6,6 +6,7 @@
 typedef struct {
     char id[16];
     char file[24];
+    char name[64];     /* note title (H1); shown in tray, default "Untitled N" */
     int x, y, w, h;
     char color[16];
     bool open;
