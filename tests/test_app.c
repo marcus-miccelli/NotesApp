@@ -17,7 +17,7 @@ void test_app(void) {
     NoteMeta* m = app_new_note(&a);
     CHECK(m != NULL);
     CHECK(a.prefs.count == 1);
-    CHECK(m->open == true);
+    CHECK(strlen(m->id) == 8);
 
     char path[260];
     CHECK(app_note_path(&a, m, path, sizeof path));

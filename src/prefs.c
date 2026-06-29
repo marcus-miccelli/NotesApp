@@ -13,11 +13,12 @@ void prefs_init_default(Prefs* p) {
     p->version = 1;
     snprintf(p->theme, sizeof p->theme, "%s", "dark");
     p->notes = NULL; p->count = 0; p->cap = 0;
+    p->windows = NULL; p->wcount = 0; p->wcap = 0;
 }
 
 void prefs_free(Prefs* p) {
-    free(p->notes);
-    p->notes = NULL; p->count = 0; p->cap = 0;
+    free(p->notes);   p->notes = NULL;   p->count = 0;  p->cap = 0;
+    free(p->windows); p->windows = NULL; p->wcount = 0; p->wcap = 0;
 }
 
 NoteMeta* prefs_add_note(Prefs* p, const char* id, const char* file) {
@@ -31,9 +32,7 @@ NoteMeta* prefs_add_note(Prefs* p, const char* id, const char* file) {
     memset(m, 0, sizeof *m);
     copy_str(m->id, sizeof m->id, id, "");
     copy_str(m->file, sizeof m->file, file, "");
-    m->x = 200; m->y = 200; m->w = 480; m->h = 360;   /* 4:3 */
     snprintf(m->color, sizeof m->color, "%s", "slate");
-    m->open = true;
     return m;
 }
 
@@ -55,6 +54,39 @@ bool prefs_remove(Prefs* p, const char* id) {
     return false;
 }
 
+WinMeta* prefs_add_window(Prefs* p, const char* id) {
+    if (p->wcount == p->wcap) {
+        size_t nc = p->wcap ? p->wcap * 2 : 4;
+        WinMeta* n = realloc(p->windows, nc * sizeof(WinMeta));
+        if (!n) return NULL;
+        p->windows = n; p->wcap = nc;
+    }
+    WinMeta* w = &p->windows[p->wcount++];
+    memset(w, 0, sizeof *w);
+    copy_str(w->id, sizeof w->id, id, "");
+    w->x = 200; w->y = 200; w->w = 480; w->h = 360;   /* 4:3 default */
+    w->active = 0; w->ntabs = 0;
+    return w;
+}
+
+WinMeta* prefs_find_window(Prefs* p, const char* id) {
+    for (size_t i = 0; i < p->wcount; i++)
+        if (strcmp(p->windows[i].id, id) == 0) return &p->windows[i];
+    return NULL;
+}
+
+bool prefs_remove_window(Prefs* p, const char* id) {
+    for (size_t i = 0; i < p->wcount; i++) {
+        if (strcmp(p->windows[i].id, id) == 0) {
+            memmove(&p->windows[i], &p->windows[i+1],
+                    (p->wcount - i - 1) * sizeof(WinMeta));
+            p->wcount--;
+            return true;
+        }
+    }
+    return false;
+}
+
 static int json_int(const cJSON* o, const char* k, int dflt) {
     const cJSON* v = cJSON_GetObjectItemCaseSensitive(o, k);
     return cJSON_IsNumber(v) ? v->valueint : dflt;
@@ -63,12 +95,6 @@ static const char* json_str(const cJSON* o, const char* k, const char* dflt) {
     const cJSON* v = cJSON_GetObjectItemCaseSensitive(o, k);
     return (cJSON_IsString(v) && v->valuestring) ? v->valuestring : dflt;
 }
-static bool json_bool(const cJSON* o, const char* k, bool dflt) {
-    const cJSON* v = cJSON_GetObjectItemCaseSensitive(o, k);
-    if (cJSON_IsBool(v)) return cJSON_IsTrue(v);
-    return dflt;
-}
-
 bool prefs_load(Prefs* p, const char* json_path) {
     prefs_init_default(p);
     FILE* f = fopen(json_path, "rb");
@@ -103,13 +129,8 @@ bool prefs_load(Prefs* p, const char* json_path) {
         if (!id || !file) continue;
         NoteMeta* m = prefs_add_note(p, id, file);
         if (!m) break;
-        m->x = json_int(it, "x", 200);
-        m->y = json_int(it, "y", 200);
-        m->w = json_int(it, "w", 480);
-        m->h = json_int(it, "h", 360);
         copy_str(m->name, sizeof m->name, json_str(it, "name", ""), "");
         copy_str(m->color, sizeof m->color, json_str(it, "color", "slate"), "slate");
-        m->open = json_bool(it, "open", true);
     }
     cJSON_Delete(root);
     return true;
@@ -126,12 +147,7 @@ bool prefs_save(const Prefs* p, const char* json_path) {
         cJSON_AddStringToObject(o, "id", m->id);
         cJSON_AddStringToObject(o, "file", m->file);
         cJSON_AddStringToObject(o, "name", m->name);
-        cJSON_AddNumberToObject(o, "x", m->x);
-        cJSON_AddNumberToObject(o, "y", m->y);
-        cJSON_AddNumberToObject(o, "w", m->w);
-        cJSON_AddNumberToObject(o, "h", m->h);
         cJSON_AddStringToObject(o, "color", m->color);
-        cJSON_AddBoolToObject(o, "open", m->open);
         cJSON_AddItemToArray(arr, o);
     }
     char* text = cJSON_Print(root);

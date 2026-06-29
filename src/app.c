@@ -51,11 +51,10 @@ NoteMeta* app_new_note(AppState* a) {
     snprintf(m->name, sizeof m->name, "Untitled %d", app_next_untitled(a));
     char path[260];
     app_note_path(a, m, path, sizeof path);
-    if (!store_write_note(path, "", 0)) {  /* create empty file */
-        prefs_remove(&a->prefs, id);       /* roll back the just-added entry */
+    if (!store_write_note(path, "", 0)) {
+        prefs_remove(&a->prefs, id);
         return NULL;
     }
-    m->open = true;
     return m;
 }
 
