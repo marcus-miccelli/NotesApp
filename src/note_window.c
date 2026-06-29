@@ -167,10 +167,58 @@ static void nw_draw_button(NoteWin* nw, const DRAWITEMSTRUCT* d) {
     DeleteObject(f);
 }
 
+/* Read the body as RichEdit-indexed text (\r breaks, CP_ACP); caller frees.
+ * *out_len gets the length (0 for empty). Returns NULL only on OOM. */
+static char* nw_body_text(HWND edit, int* out_len) {
+    GETTEXTLENGTHEX gtl; gtl.flags = GTL_DEFAULT; gtl.codepage = CP_ACP;
+    int len = (int)SendMessageW(edit, EM_GETTEXTLENGTHEX, (WPARAM)&gtl, 0);
+    if (len < 0) len = 0;
+    char* buf = malloc((size_t)len + 1);
+    if (!buf) { *out_len = 0; return NULL; }
+    if (len > 0) {
+        GETTEXTEX gte; gte.cb = (DWORD)(len + 1); gte.flags = GT_DEFAULT;
+        gte.codepage = CP_ACP; gte.lpDefaultChar = NULL; gte.lpUsedDefChar = NULL;
+        SendMessageW(edit, EM_GETTEXTEX, (WPARAM)&gte, (LPARAM)buf);
+    } else buf[0] = '\0';
+    *out_len = len;
+    return buf;
+}
+
+/* Is the line starting at ls an ATX heading? (<=3 spaces, 1-6 '#', then space
+ * or line end) — matching the CommonMark headings the renderer styles. */
+static int nw_line_is_heading(const char* buf, int len, LONG ls) {
+    LONG p = ls; int sp = 0;
+    while (p < len && buf[p] == ' ' && sp < 3) { p++; sp++; }
+    int h = 0;
+    while (p < len && buf[p] == '#' && h < 6) { p++; h++; }
+    if (h == 0) return 0;
+    return (p >= len || buf[p] == ' ' || buf[p] == '\r' || buf[p] == '\n');
+}
+
+/* Does the body caret/selection start on a heading line? Headings are hard H1
+ * and not formattable, so this gates both the highlights and the actions. */
+static int nw_caret_on_heading(NoteWin* nw) {
+    CHARRANGE sel; SendMessageW(nw->edit, EM_EXGETSEL, 0, (LPARAM)&sel);
+    int len; char* buf = nw_body_text(nw->edit, &len);
+    if (!buf) return 0;
+    LONG ls = sel.cpMin; if (ls > len) ls = len;
+    while (ls > 0 && buf[ls-1] != '\r' && buf[ls-1] != '\n') ls--;
+    int r = nw_line_is_heading(buf, len, ls);
+    free(buf);
+    return r;
+}
+
+/* Clear all toggle highlights, repainting any that change. */
+static void nw_clear_toggles(NoteWin* nw) {
+    for (int i = 0; i < NUM_BTNS; i++)
+        if (nw->active[i]) { nw->active[i] = 0; InvalidateRect(nw->btns[i], NULL, TRUE); }
+}
+
 /* Recompute which formats apply at the body caret/selection and repaint any
  * button whose highlight changed. Inline styles come from the character format,
- * lists from the paragraph numbering. */
+ * lists from the paragraph numbering. Headings highlight nothing. */
 static void nw_update_toggles(NoteWin* nw) {
+    if (nw_caret_on_heading(nw)) { nw_clear_toggles(nw); return; }
     int s[NUM_BTNS] = { 0 };
     CHARFORMAT2W cf; memset(&cf, 0, sizeof cf); cf.cbSize = sizeof cf;
     cf.dwMask = CFM_BOLD | CFM_ITALIC | CFM_STRIKEOUT;
@@ -476,23 +524,6 @@ static void nw_apply_format(NoteWin* nw) {
     SendMessageW(nw->edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
 }
 
-/* Read the body as RichEdit-indexed text (\r breaks, CP_ACP); caller frees.
- * *out_len gets the length (0 for empty). Returns NULL only on OOM. */
-static char* nw_body_text(HWND edit, int* out_len) {
-    GETTEXTLENGTHEX gtl; gtl.flags = GTL_DEFAULT; gtl.codepage = CP_ACP;
-    int len = (int)SendMessageW(edit, EM_GETTEXTLENGTHEX, (WPARAM)&gtl, 0);
-    if (len < 0) len = 0;
-    char* buf = malloc((size_t)len + 1);
-    if (!buf) { *out_len = 0; return NULL; }
-    if (len > 0) {
-        GETTEXTEX gte; gte.cb = (DWORD)(len + 1); gte.flags = GT_DEFAULT;
-        gte.codepage = CP_ACP; gte.lpDefaultChar = NULL; gte.lpUsedDefChar = NULL;
-        SendMessageW(edit, EM_GETTEXTEX, (WPARAM)&gte, (LPARAM)buf);
-    } else buf[0] = '\0';
-    *out_len = len;
-    return buf;
-}
-
 /* Persist + restyle the body now (used after a programmatic edit), with redraw
  * suppressed to avoid flicker. */
 static void nw_reformat_now(NoteWin* nw) {
@@ -518,6 +549,7 @@ static int nw_marker_len(const char* buf, int len, LONG p) {
  * marker it is unwrapped; otherwise it is wrapped (with no selection, the caret
  * lands between the markers). The live formatter then renders + hides them. */
 static void nw_wrap_inline(NoteWin* nw, const char* marker) {
+    if (nw_caret_on_heading(nw)) return;     /* headings are hard H1 */
     HWND e = nw->edit;
     int mlen = (int)strlen(marker);
     wchar_t wmark[8];
@@ -563,6 +595,7 @@ static void nw_wrap_inline(NoteWin* nw, const char* marker) {
  * requested kind it is removed from all lines; otherwise it is added (converting
  * the other kind in place). The live formatter turns markers into bullets. */
 static void nw_list_prefix(NoteWin* nw, int numbered) {
+    if (nw_caret_on_heading(nw)) return;     /* headings are hard H1 */
     HWND e = nw->edit;
     SendMessageW(e, EM_SETEVENTMASK, 0, 0);
     CHARRANGE sel; SendMessageW(e, EM_EXGETSEL, 0, (LPARAM)&sel);
@@ -722,6 +755,10 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         NMHDR* hdr = (NMHDR*)lp;
         if (nw && hdr->code == EN_SELCHANGE && hdr->idFrom == ID_EDIT) {
             nw_update_toggles(nw);
+            return 0;
+        }
+        if (nw && hdr->code == EN_SELCHANGE && hdr->idFrom == ID_TITLE) {
+            nw_clear_toggles(nw);   /* title is hard H1; nothing to highlight */
             return 0;
         }
         if (nw && hdr->code == EN_MSGFILTER &&
