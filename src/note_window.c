@@ -83,6 +83,11 @@ typedef struct {
     HWND  wbtns[NUM_WBTNS];
     int   whot[NUM_WBTNS];
     int   active_fmt[NUM_BTNS];
+    /* drag-to-reorder state (Task 9) */
+    int   drag_tab;   /* index of tab being dragged, or -1 when idle */
+    int   drag_dx;    /* cursor x-offset from the tab's left edge at press */
+    int   press_x;    /* x at button-down, used for threshold detection */
+    int   dragging;   /* 1 once the threshold has been exceeded */
 } NoteWin;
 
 static HMODULE g_richedit = NULL;
@@ -1050,6 +1055,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         CREATESTRUCTW* cs = (CREATESTRUCTW*)lp;
         nw = (NoteWin*)cs->lpCreateParams;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)nw);
+        nw->drag_tab = -1;   /* calloc zeros, but 0 is a valid tab index */
 
         /* Dark native title bar (best-effort; ignored on older Windows). */
         BOOL dark = TRUE;
@@ -1183,8 +1189,50 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             int idx = -1;
             TabHit h = nw_tab_hit(nw, hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &idx);
             if (h == HIT_PLUS)  { nw_add_tab(nw, hwnd); return 0; }
-            if (h == HIT_TAB)   { nw_activate(nw, hwnd, idx); return 0; }
+            if (h == HIT_TAB) {
+                nw_activate(nw, hwnd, idx);
+                RECT r; nw_tab_rect(nw, hwnd, idx, &r);
+                nw->drag_tab = idx;
+                nw->drag_dx  = GET_X_LPARAM(lp) - r.left;
+                nw->press_x  = GET_X_LPARAM(lp);
+                nw->dragging = 0;
+                SetCapture(hwnd);
+                return 0;
+            }
             if (h == HIT_CLOSE) { nw_close_tab(nw, hwnd, idx); return 0; }
+        }
+        return 0;
+    case WM_MOUSEMOVE:
+        if (nw && GetCapture() == hwnd && nw->drag_tab >= 0) {
+            int x = GET_X_LPARAM(lp);
+            if (!nw->dragging && abs(x - nw->press_x) > DRAG_THRESHOLD) nw->dragging = 1;
+            if (nw->dragging) {
+                int w = nw_tab_w(nw, hwnd);
+                int center = x - nw->drag_dx + w / 2;      /* dragged tab center */
+                int target = (center - nw_strip_left()) / w;
+                if (target < 0) target = 0;
+                if (target > nw->ntabs - 1) target = nw->ntabs - 1;
+                if (target != nw->drag_tab) {
+                    NoteTab moved = nw->tab[nw->drag_tab];
+                    if (target > nw->drag_tab)
+                        for (int k = nw->drag_tab; k < target; k++) nw->tab[k] = nw->tab[k+1];
+                    else
+                        for (int k = nw->drag_tab; k > target; k--) nw->tab[k] = nw->tab[k-1];
+                    nw->tab[target] = moved;
+                    nw->active = target;
+                    nw->drag_tab = target;
+                    nw_sync_winmeta(nw);
+                    InvalidateRect(hwnd, NULL, TRUE);
+                }
+            }
+            return 0;
+        }
+        return 0;
+    case WM_LBUTTONUP:
+        if (nw && GetCapture() == hwnd) {
+            ReleaseCapture();
+            nw->drag_tab = -1;
+            nw->dragging = 0;
         }
         return 0;
     case WM_MBUTTONDOWN:
