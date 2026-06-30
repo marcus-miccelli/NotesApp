@@ -12,6 +12,7 @@
 
 #define NOTE_CLASS   L"StickyNoteWindow"
 #define ID_EDIT      1001
+#define ID_RENAME    1003
 #define DEBOUNCE_MS  150
 #define IDT_DEBOUNCE 1
 
@@ -88,6 +89,10 @@ typedef struct {
     int   drag_dx;    /* cursor x-offset from the tab's left edge at press */
     int   press_x;    /* x at button-down, used for threshold detection */
     int   dragging;   /* 1 once the threshold has been exceeded */
+    /* rename-overlay state (Task 10) */
+    HWND  rename_edit;  /* NULL when no rename in progress */
+    HFONT rename_font;  /* font for the rename edit; freed on commit */
+    int   rename_tab;   /* index of the tab being renamed */
 } NoteWin;
 
 static HMODULE g_richedit = NULL;
@@ -995,6 +1000,58 @@ static void nw_delete_note(NoteWin* nw, HWND hwnd) {
     /* nw_remove_tab may have destroyed hwnd; do not touch nw after this */
 }
 
+/* ---- Rename overlay (Task 10 / Ctrl+R) ---- */
+static void nw_commit_rename(NoteWin* nw, HWND hwnd, int accept); /* forward */
+
+static LRESULT CALLBACK nw_rename_sub(HWND h, UINT msg, WPARAM wp, LPARAM lp,
+                                      UINT_PTR id, DWORD_PTR ref) {
+    (void)id;
+    NoteWin* nw = (NoteWin*)ref;
+    HWND parent = GetParent(h);
+    if (msg == WM_KEYDOWN && wp == VK_RETURN) { nw_commit_rename(nw, parent, 1); return 0; }
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE) { nw_commit_rename(nw, parent, 0); return 0; }
+    if (msg == WM_KILLFOCUS) { if (nw->rename_edit) nw_commit_rename(nw, parent, 1); }
+    return DefSubclassProc(h, msg, wp, lp);
+}
+
+static void nw_begin_rename(NoteWin* nw, HWND hwnd) {
+    if (nw->rename_edit || nw->ntabs == 0) return;
+    int i = nw->active;
+    RECT r; nw_tab_rect(nw, hwnd, i, &r);
+    NoteMeta* m = prefs_find(&nw->app->prefs, nw->tab[i].id);
+    nw->rename_tab = i;
+    nw->rename_edit = CreateWindowExW(0, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        r.left + 4, 5, (r.right - r.left) - 8, TITLEBAR_H - 10,
+        hwnd, (HMENU)ID_RENAME, GetModuleHandleW(NULL), NULL);
+    nw->rename_font = CreateFontW(-15,0,0,0,FW_SEMIBOLD,0,0,0,0,0,0,0,0,L"Segoe UI");
+    SendMessageW(nw->rename_edit, WM_SETFONT, (WPARAM)nw->rename_font, TRUE);
+    SetWindowTextA(nw->rename_edit, m && m->name[0] ? m->name : "");
+    SendMessageW(nw->rename_edit, EM_SETSEL, 0, -1);
+    SetWindowSubclass(nw->rename_edit, nw_rename_sub, 0, (DWORD_PTR)nw);
+    SetFocus(nw->rename_edit);
+}
+
+static void nw_commit_rename(NoteWin* nw, HWND hwnd, int accept) {
+    if (!nw->rename_edit) return;
+    HWND e = nw->rename_edit;
+    nw->rename_edit = NULL;              /* clear first: kill-focus reentry guard */
+    if (accept) {
+        char buf[64];
+        GetWindowTextA(e, buf, sizeof buf);
+        char* s = buf; while (*s == ' ') s++;
+        size_t n = strlen(s); while (n > 0 && s[n-1] == ' ') s[--n] = '\0';
+        if (s[0]) {
+            NoteMeta* m = prefs_find(&nw->app->prefs, nw->tab[nw->rename_tab].id);
+            if (m) { snprintf(m->name, sizeof m->name, "%s", s); nw_save_tab(nw, nw->rename_tab); }
+        }
+    }
+    if (nw->rename_font) { DeleteObject(nw->rename_font); nw->rename_font = NULL; }
+    DestroyWindow(e);
+    InvalidateRect(hwnd, NULL, TRUE);
+    if (nw_edit(nw)) SetFocus(nw_edit(nw));
+}
+
 /* Handle shortcuts forwarded from a RichEdit via EN_MSGFILTER. Returns nonzero
  * if the keystroke was consumed (so the control ignores it). Global shortcuts
  * (new/delete) work from either box; formatting shortcuts apply to the body
@@ -1005,6 +1062,7 @@ static LRESULT nw_handle_key(NoteWin* nw, HWND hwnd, const MSGFILTER* mf) {
     BOOL shift = (GetKeyState(VK_SHIFT)   & 0x8000) != 0;
     if (!ctrl) return 0;
     if (mf->wParam == 'N' && !shift) { nw_add_tab(nw, hwnd); return 1; }
+    if (mf->wParam == 'R' && !shift) { nw_begin_rename(nw, hwnd); return 1; }
     if (mf->wParam == 'D' && shift)  { nw_delete_note(nw, hwnd); return 1; }
 
     if (mf->nmhdr.idFrom == ID_EDIT) {
