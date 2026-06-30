@@ -39,6 +39,16 @@
 #define WINBTN_W     46    /* min/max/close button width (native caption width) */
 #define BTN_GAP      3     /* between sidebar buttons */
 
+/* Tab strip geometry (px). */
+#define DRAG_GAP      36   /* gap between last tab/+ and the window buttons */
+#define PLUS_W        28   /* width of the + add-tab button */
+#define TAB_MIN       48   /* minimum tab width */
+#define TAB_MAX      200   /* maximum tab width */
+#define TAB_CLOSE_W   18   /* per-tab close (✕) region on the right */
+#define DRAG_THRESHOLD 6   /* px movement before a tab drag begins (Task 8) */
+
+typedef enum { HIT_NONE, HIT_TAB, HIT_CLOSE, HIT_PLUS } TabHit;
+
 /* Notifications we want from the RichEdit: text changes (for live-format
  * debounce), key events (shortcuts via EN_MSGFILTER), and selection changes
  * (to keep the sidebar toggle highlights in sync with the caret). */
@@ -146,6 +156,44 @@ static void nw_regions(HWND hwnd, RECT* title, RECT* body, int* vx, int* hy) {
     if (body)  SetRect(body,  cl, b_top, cr, b_bot);
     if (vx) *vx = v;
     if (hy) *hy = h;
+}
+
+/* Tab strip geometry helpers — shared by paint (Task 6) and hit-test (Task 7). */
+static int nw_strip_left(void)  { return SIDEBAR_W + 1; }
+static int nw_strip_right(HWND hwnd) {
+    RECT rc; GetClientRect(hwnd, &rc);
+    int btns_l = rc.right - NUM_WBTNS * WINBTN_W;
+    return btns_l - DRAG_GAP;
+}
+static int nw_tab_w(NoteWin* nw, HWND hwnd) {
+    int avail = nw_strip_right(hwnd) - nw_strip_left() - PLUS_W;
+    int n = nw->ntabs > 0 ? nw->ntabs : 1;
+    int w = avail / n;
+    if (w > TAB_MAX) w = TAB_MAX;
+    if (w < TAB_MIN) w = TAB_MIN;
+    return w;
+}
+static void nw_tab_rect(NoteWin* nw, HWND hwnd, int i, RECT* r) {
+    int w = nw_tab_w(nw, hwnd), l = nw_strip_left() + i * w;
+    SetRect(r, l, 0, l + w, TITLEBAR_H);
+}
+static void nw_plus_rect(NoteWin* nw, HWND hwnd, RECT* r) {
+    int w = nw_tab_w(nw, hwnd), l = nw_strip_left() + nw->ntabs * w;
+    SetRect(r, l, 0, l + PLUS_W, TITLEBAR_H);
+}
+static TabHit nw_tab_hit(NoteWin* nw, HWND hwnd, int cx, int cy, int* out_idx) {
+    if (cy < 0 || cy >= TITLEBAR_H) return HIT_NONE;
+    for (int i = 0; i < nw->ntabs; i++) {
+        RECT r; nw_tab_rect(nw, hwnd, i, &r);
+        if (cx >= r.left && cx < r.right) {
+            if (out_idx) *out_idx = i;
+            if (cx >= r.right - TAB_CLOSE_W) return HIT_CLOSE;
+            return HIT_TAB;
+        }
+    }
+    RECT pr; nw_plus_rect(nw, hwnd, &pr);
+    if (cx >= pr.left && cx < pr.right) return HIT_PLUS;
+    return HIT_NONE;
 }
 
 /* Sidebar buttons are squares the full sidebar width, stacked below the
@@ -876,6 +924,37 @@ static LRESULT nw_handle_key(NoteWin* nw, HWND hwnd, const MSGFILTER* mf) {
     return 0;
 }
 
+/* Draw Windows-Terminal-style tab strip in the title bar area. */
+static void nw_paint_tabs(NoteWin* nw, HWND hwnd, HDC hdc) {
+    HFONT f = CreateFontW(-15,0,0,0,FW_SEMIBOLD,0,0,0,0,0,0,0,0,L"Segoe UI"); /* ~H3 */
+    HFONT old = (HFONT)SelectObject(hdc, f);
+    SetBkMode(hdc, TRANSPARENT);
+    for (int i = 0; i < nw->ntabs; i++) {
+        RECT r; nw_tab_rect(nw, hwnd, i, &r);
+        int isact = (i == nw->active);
+        HBRUSH bg = CreateSolidBrush(isact ? COL_TOGGLE : COL_BG);
+        FillRect(hdc, &r, bg); DeleteObject(bg);
+        if (isact) {                                  /* accent top edge */
+            RECT top = { r.left, 0, r.right, 2 };
+            HBRUSH ac = CreateSolidBrush(RGB(0x6a,0x9a,0xff));
+            FillRect(hdc, &top, ac); DeleteObject(ac);
+        }
+        NoteMeta* m = nw_note_meta(nw, i);
+        wchar_t wname[128];
+        MultiByteToWideChar(CP_ACP, 0, m && m->name[0] ? m->name : "Untitled", -1, wname, 128);
+        RECT tr = { r.left + 8, r.top, r.right - TAB_CLOSE_W, r.bottom };
+        SetTextColor(hdc, COL_TEXT);
+        DrawTextW(hdc, wname, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        RECT xr = { r.right - TAB_CLOSE_W, r.top, r.right, r.bottom };   /* close glyph */
+        SetTextColor(hdc, RGB(0xb0,0xb0,0xb8));
+        DrawTextW(hdc, L"\x2715", -1, &xr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    RECT pr; nw_plus_rect(nw, hwnd, &pr);            /* + button */
+    SetTextColor(hdc, COL_TEXT);
+    DrawTextW(hdc, L"+", -1, &pr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(hdc, old); DeleteObject(f);
+}
+
 static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     NoteWin* nw = nw_get(hwnd);
     switch (msg) {
@@ -965,20 +1044,8 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         FillRect(hdc, &vline, g_border_brush);
         FillRect(hdc, &hline, g_border_brush);
 
-        /* active note's name as plain text in the title bar (tab strip: Task 6) */
-        NoteMeta* am = (nw && nw->ntabs > 0) ? nw_note_meta(nw, nw->active) : NULL;
-        if (am) {
-            RECT tr; int dummy;
-            nw_regions(hwnd, &tr, NULL, &dummy, &dummy);
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, COL_TEXT);
-            HFONT f = CreateFontW(-18,0,0,0,FW_SEMIBOLD,0,0,0,0,0,0,0,0,L"Segoe UI");
-            HFONT old = (HFONT)SelectObject(hdc, f);
-            wchar_t wname[128];
-            MultiByteToWideChar(CP_ACP, 0, am->name, -1, wname, 128);
-            DrawTextW(hdc, wname, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-            SelectObject(hdc, old); DeleteObject(f);
-        }
+        /* Tab strip: all tabs + ✕ glyphs + the + button (Task 6). */
+        if (nw) nw_paint_tabs(nw, hwnd, hdc);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -1007,7 +1074,11 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (pt.x >= rc.right - RS) return HTTOPRIGHT;
             return HTTOP;
         }
-        if (pt.y < TITLEBAR_H) return HTCAPTION;   /* drag; child buttons sit on top */
+        if (pt.y < TITLEBAR_H) {
+            /* Task 7 routes clicks through nw_tab_hit; call site established here. */
+            if (nw) (void)nw_tab_hit(nw, hwnd, pt.x, pt.y, NULL);
+            return HTCAPTION;
+        }
         return HTCLIENT;
     }
     case WM_GETMINMAXINFO: {
