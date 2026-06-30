@@ -2,6 +2,7 @@
 #include "note_window.h"
 #include "resource.h"
 #include <shellapi.h>
+#include <stdio.h>
 #include <string.h>
 #include <wchar.h>
 
@@ -24,7 +25,8 @@ static void tray_show_menu(HWND hwnd) {
         wchar_t label[96];
         const NoteMeta* nm = &s_app->prefs.notes[i];
         const char* disp = nm->name[0] ? nm->name : nm->id;
-        swprintf(label, 96, L"%hs%s", disp, nm->open ? L"  (open)" : L"");
+        int open = note_window_find_by_note(nm->id) != NULL;
+        swprintf(label, 96, L"%hs%s", disp, open ? L"  (open)" : L"");
         AppendMenuW(m, MF_STRING, IDM_NOTE0 + (UINT)i, label);
     }
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
@@ -43,17 +45,22 @@ static LRESULT CALLBACK owner_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND: {
         UINT id = LOWORD(wp);
         if (id == IDM_NEW) {
-            NoteMeta* m = app_new_note(s_app);
-            if (m) note_window_open(s_app, m);
+            WinMeta* w = app_new_window(s_app);
+            if (w) note_window_open(s_app, w);
         } else if (id == IDM_QUIT) {
             PostQuitMessage(0);
         } else if (id >= IDM_NOTE0) {
             size_t i = id - IDM_NOTE0;
             if (i < s_app->prefs.count) {
                 NoteMeta* nm = &s_app->prefs.notes[i];
-                HWND existing = note_window_find_open(nm->id);
-                if (existing) SetForegroundWindow(existing);
-                else note_window_open(s_app, nm);
+                char nid[16]; snprintf(nid, sizeof nid, "%s", nm->id);
+                HWND existing = note_window_find_by_note(nid);
+                if (existing) {
+                    note_window_activate_note(existing, nid);
+                } else {
+                    WinMeta* w = app_open_note_in_window(s_app, nid);
+                    if (w) note_window_open(s_app, w);
+                }
             }
         }
         return 0;

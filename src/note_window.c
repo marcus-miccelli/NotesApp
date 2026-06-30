@@ -12,7 +12,6 @@
 
 #define NOTE_CLASS   L"StickyNoteWindow"
 #define ID_EDIT      1001
-#define ID_TITLE     1002
 #define DEBOUNCE_MS  150
 #define IDT_DEBOUNCE 1
 
@@ -60,14 +59,20 @@ static const COLORREF COL_CLOSE  = RGB(0xc0, 0x3a, 0x3a);  /* close button hover
 static const COLORREF COL_HOVER  = RGB(0x3a, 0x3a, 0x44);  /* min/max button hover */
 
 typedef struct {
+    char id[16];      /* note id */
+    HWND edit;        /* this tab's body RichEdit */
+} NoteTab;
+
+typedef struct {
     AppState* app;
-    char id[16];               /* note id; resolve NoteMeta* fresh via nw_meta() */
-    HWND title;                /* single-line H1 title box; content = note name */
-    HWND edit;                 /* multi-line markdown body */
-    HWND btns[NUM_BTNS];       /* formatting sidebar buttons */
-    HWND wbtns[NUM_WBTNS];     /* min / max / close chrome buttons */
-    int  whot[NUM_WBTNS];      /* hover state per chrome button */
-    int  active[NUM_BTNS];     /* which formats apply at the caret (highlight) */
+    char  win_id[16];          /* resolve WinMeta* fresh via prefs_find_window */
+    NoteTab tab[WIN_MAX_TABS];
+    int   ntabs;
+    int   active;
+    HWND  btns[NUM_BTNS];
+    HWND  wbtns[NUM_WBTNS];
+    int   whot[NUM_WBTNS];
+    int   active_fmt[NUM_BTNS];
 } NoteWin;
 
 static HMODULE g_richedit = NULL;
@@ -77,43 +82,47 @@ static HICON   g_app_icon = NULL;     /* qN, painted in the top-left cell */
 
 static NoteWin* nw_get(HWND h) { return (NoteWin*)GetWindowLongPtrW(h, GWLP_USERDATA); }
 
-/* Resolve the current NoteMeta* by id at point of use. The prefs.notes[] array
- * can be realloc'd (add) or memmove'd (remove), so a cached NoteMeta* would
- * dangle. Always resolve fresh and NULL-check (the note may have been deleted). */
-static NoteMeta* nw_meta(NoteWin* nw) { return prefs_find(&nw->app->prefs, nw->id); }
+/* Resolve the WinMeta* / active tab fresh at point of use. prefs arrays can be
+ * realloc'd or memmove'd, so cached pointers would dangle. Always NULL-check. */
+static WinMeta* nw_win(NoteWin* nw) { return prefs_find_window(&nw->app->prefs, nw->win_id); }
+static NoteTab* nw_cur(NoteWin* nw) { return (nw->ntabs > 0) ? &nw->tab[nw->active] : NULL; }
+static HWND     nw_edit(NoteWin* nw) { NoteTab* t = nw_cur(nw); return t ? t->edit : NULL; }
+static NoteMeta* nw_note_meta(NoteWin* nw, int i) {
+    return prefs_find(&nw->app->prefs, nw->tab[i].id);
+}
 
-/* ---- best-effort open-window registry, keyed by note id ----
+/* ---- best-effort open-window registry, keyed by window id ----
  * Lets the tray dedupe reopen requests. If full, the new entry just isn't
  * tracked (treated as "not open"); correctness still holds. */
 #define NW_REGISTRY_CAP 64
-typedef struct { char id[16]; HWND hwnd; } NwRegEntry;
+typedef struct { char win_id[16]; HWND hwnd; } NwRegEntry;
 static NwRegEntry s_registry[NW_REGISTRY_CAP];
 
-static void nw_registry_add(const char* id, HWND hwnd) {
-    for (int i = 0; i < NW_REGISTRY_CAP; i++) {
+static void nw_registry_add(const char* win_id, HWND hwnd) {
+    for (int i = 0; i < NW_REGISTRY_CAP; i++)
         if (s_registry[i].hwnd == NULL) {
-            snprintf(s_registry[i].id, sizeof s_registry[i].id, "%s", id);
-            s_registry[i].hwnd = hwnd;
-            return;
+            snprintf(s_registry[i].win_id, sizeof s_registry[i].win_id, "%s", win_id);
+            s_registry[i].hwnd = hwnd; return;
         }
-    }
     /* full: leave untracked (best-effort) */
 }
-
 static void nw_registry_remove(HWND hwnd) {
-    for (int i = 0; i < NW_REGISTRY_CAP; i++) {
-        if (s_registry[i].hwnd == hwnd) {
-            s_registry[i].hwnd = NULL;
-            s_registry[i].id[0] = '\0';
-            return;
-        }
-    }
+    for (int i = 0; i < NW_REGISTRY_CAP; i++)
+        if (s_registry[i].hwnd == hwnd) { s_registry[i].hwnd = NULL; s_registry[i].win_id[0] = '\0'; return; }
 }
-
-HWND note_window_find_open(const char* id) {
-    for (int i = 0; i < NW_REGISTRY_CAP; i++) {
-        if (s_registry[i].hwnd != NULL && strcmp(s_registry[i].id, id) == 0)
+HWND note_window_find_open_window(const char* win_id) {
+    for (int i = 0; i < NW_REGISTRY_CAP; i++)
+        if (s_registry[i].hwnd && strcmp(s_registry[i].win_id, win_id) == 0)
             return s_registry[i].hwnd;
+    return NULL;
+}
+HWND note_window_find_by_note(const char* note_id) {
+    for (int i = 0; i < NW_REGISTRY_CAP; i++) {
+        if (!s_registry[i].hwnd) continue;
+        NoteWin* nw = nw_get(s_registry[i].hwnd);
+        if (!nw) continue;
+        for (int t = 0; t < nw->ntabs; t++)
+            if (strcmp(nw->tab[t].id, note_id) == 0) return s_registry[i].hwnd;
     }
     return NULL;
 }
@@ -156,8 +165,10 @@ static void nw_layout(HWND hwnd, NoteWin* nw) {
         MoveWindow(nw->wbtns[i], rc.right - (NUM_WBTNS - i) * WINBTN_W, 0,
                    WINBTN_W, hy, TRUE);
 
-    MoveWindow(nw->title, tt.left, tt.top, tt.right - tt.left, tt.bottom - tt.top, TRUE);
-    MoveWindow(nw->edit,  bd.left, bd.top, bd.right - bd.left, bd.bottom - bd.top, TRUE);
+    (void)tt;
+    for (int i = 0; i < nw->ntabs; i++)
+        MoveWindow(nw->tab[i].edit, bd.left, bd.top,
+                   bd.right - bd.left, bd.bottom - bd.top, TRUE);
 }
 
 /* Owner-draw a sidebar button: blends with the dark sidebar (no distinct fill)
@@ -167,7 +178,7 @@ static void nw_layout(HWND hwnd, NoteWin* nw) {
 static void nw_draw_button(NoteWin* nw, const DRAWITEMSTRUCT* d) {
     int idx = (int)d->CtlID - IDB_BOLD;
     int on = (d->itemState & ODS_SELECTED) != 0 ||
-             (idx >= 0 && idx < NUM_BTNS && nw->active[idx]);
+             (idx >= 0 && idx < NUM_BTNS && nw->active_fmt[idx]);
     HBRUSH bg = CreateSolidBrush(on ? COL_TOGGLE : COL_BG);
     FillRect(d->hDC, &d->rcItem, bg);
     DeleteObject(bg);
@@ -271,8 +282,9 @@ static int nw_line_is_heading(const char* buf, int len, LONG ls) {
 /* Does the body caret/selection start on a heading line? Headings are hard H1
  * and not formattable, so this gates both the highlights and the actions. */
 static int nw_caret_on_heading(NoteWin* nw) {
-    CHARRANGE sel; SendMessageW(nw->edit, EM_EXGETSEL, 0, (LPARAM)&sel);
-    int len; char* buf = nw_body_text(nw->edit, &len);
+    HWND e = nw_edit(nw);
+    CHARRANGE sel; SendMessageW(e, EM_EXGETSEL, 0, (LPARAM)&sel);
+    int len; char* buf = nw_body_text(e, &len);
     if (!buf) return 0;
     LONG ls = sel.cpMin; if (ls > len) ls = len;
     while (ls > 0 && buf[ls-1] != '\r' && buf[ls-1] != '\n') ls--;
@@ -284,7 +296,7 @@ static int nw_caret_on_heading(NoteWin* nw) {
 /* Clear all toggle highlights, repainting any that change. */
 static void nw_clear_toggles(NoteWin* nw) {
     for (int i = 0; i < NUM_BTNS; i++)
-        if (nw->active[i]) { nw->active[i] = 0; InvalidateRect(nw->btns[i], NULL, TRUE); }
+        if (nw->active_fmt[i]) { nw->active_fmt[i] = 0; InvalidateRect(nw->btns[i], NULL, TRUE); }
 }
 
 /* Recompute which formats apply at the body caret/selection and repaint any
@@ -295,10 +307,11 @@ static void nw_clear_toggles(NoteWin* nw) {
 static void nw_update_toggles(NoteWin* nw) {
     if (nw_caret_on_heading(nw)) { nw_clear_toggles(nw); return; }
     int s[NUM_BTNS] = { 0 };
+    HWND e = nw_edit(nw);
 
-    CHARRANGE sel; SendMessageW(nw->edit, EM_EXGETSEL, 0, (LPARAM)&sel);
+    CHARRANGE sel; SendMessageW(e, EM_EXGETSEL, 0, (LPARAM)&sel);
     LONG caret = sel.cpMin;
-    int len; char* buf = nw_body_text(nw->edit, &len);
+    int len; char* buf = nw_body_text(e, &len);
     if (buf) {
         MdSpan spans[256];
         size_t n = markdown_spans(buf, (size_t)len, spans, 256);
@@ -319,109 +332,70 @@ static void nw_update_toggles(NoteWin* nw) {
 
     PARAFORMAT2 pf; memset(&pf, 0, sizeof pf); pf.cbSize = sizeof pf;
     pf.dwMask = PFM_NUMBERING;
-    SendMessageW(nw->edit, EM_GETPARAFORMAT, 0, (LPARAM)&pf);
+    SendMessageW(e, EM_GETPARAFORMAT, 0, (LPARAM)&pf);
     s[3] = (pf.wNumbering == PFN_BULLET);
     s[4] = (pf.wNumbering == PFN_ARABIC);
 
     for (int i = 0; i < NUM_BTNS; i++) {
-        if (s[i] != nw->active[i]) {
-            nw->active[i] = s[i];
+        if (s[i] != nw->active_fmt[i]) {
+            nw->active_fmt[i] = s[i];
             InvalidateRect(nw->btns[i], NULL, TRUE);
         }
     }
 }
 
-/* Style the whole title box (and its default for new input) as a dark H1. */
-static void nw_style_title(HWND title) {
-    CHARRANGE all = { 0, -1 };
-    SendMessageW(title, EM_EXSETSEL, 0, (LPARAM)&all);
-    CHARFORMAT2W cf; memset(&cf, 0, sizeof cf); cf.cbSize = sizeof cf;
-    cf.dwMask = CFM_BOLD | CFM_SIZE | CFM_FACE | CFM_COLOR;
-    cf.dwEffects = CFE_BOLD;
-    cf.yHeight = 360;                 /* ~18pt H1 */
-    cf.crTextColor = COL_TEXT;
-    wcscpy(cf.szFaceName, L"Segoe UI");
-    SendMessageW(title, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
-    CHARRANGE caret = { 0, 0 };
-    SendMessageW(title, EM_EXSETSEL, 0, (LPARAM)&caret);
-}
-
-/* The .md is "# <title>\n\n<body>": the first line's H1 is the note title, the
- * rest is the body. Split on load so each goes to its own control. If there is
- * no leading H1 (legacy/empty file), the whole file is body and the title falls
- * back to the persisted note name. */
-static void nw_load_content(NoteWin* nw) {
-    NoteMeta* m = nw_meta(nw);
+/* Load tab i's note: "# name\n\n body" -> name is metadata, body fills the edit. */
+static void nw_load_tab(NoteWin* nw, int i) {
+    NoteMeta* m = prefs_find(&nw->app->prefs, nw->tab[i].id);
     if (!m) return;
     char path[260];
     app_note_path(nw->app, m, path, sizeof path);
     char* txt = NULL; size_t n = 0;
-    char* title = NULL;
     const char* body = "";
     if (store_read_note(path, &txt, &n)) {
         body = txt;
         if (n >= 2 && txt[0] == '#' && txt[1] == ' ') {
-            size_t i = 2;
-            while (i < n && txt[i] != '\n' && txt[i] != '\r') i++;
-            size_t tlen = i - 2;
-            title = malloc(tlen + 1);
-            if (title) { memcpy(title, txt + 2, tlen); title[tlen] = '\0'; }
-            if (i < n && txt[i] == '\r') i++;
-            if (i < n && txt[i] == '\n') i++;
-            /* skip a single blank separator line after the title */
-            size_t j = i;
+            size_t k = 2; while (k < n && txt[k] != '\n' && txt[k] != '\r') k++;
+            if (k < n && txt[k] == '\r') k++;
+            if (k < n && txt[k] == '\n') k++;
+            size_t j = k;
             if (j < n && txt[j] == '\r') j++;
-            if (j < n && txt[j] == '\n') i = j + 1;
-            body = txt + i;
+            if (j < n && txt[j] == '\n') k = j + 1;
+            body = txt + k;
         }
     }
-    const char* tshow = (title && title[0]) ? title : m->name;
-    SetWindowTextA(nw->title, tshow ? tshow : "");
-    nw_style_title(nw->title);
-    SetWindowTextA(nw->edit, body);
-    snprintf(m->name, sizeof m->name, "%s", tshow ? tshow : "");
-    SetWindowTextA(GetParent(nw->title), m->name[0] ? m->name : "quickNote");
-    free(title);
+    SetWindowTextA(nw->tab[i].edit, body);
     free(txt);
 }
 
-static void nw_save_content(NoteWin* nw) {
-    NoteMeta* m = nw_meta(nw);
+/* Save tab i's body, prefixing the current name as "# name". */
+static void nw_save_tab(NoteWin* nw, int i) {
+    NoteMeta* m = prefs_find(&nw->app->prefs, nw->tab[i].id);
     if (!m) return;
-    int tl = GetWindowTextLengthA(nw->title);
-    int bl = GetWindowTextLengthA(nw->edit);
-    char* t = malloc((size_t)tl + 1); if (!t) return;
-    char* b = malloc((size_t)bl + 1); if (!b) { free(t); return; }
-    GetWindowTextA(nw->title, t, tl + 1);
-    GetWindowTextA(nw->edit, b, bl + 1);
-    /* title is single-line; neutralize any stray break just in case */
-    for (char* p = t; *p; ++p) if (*p == '\r' || *p == '\n') *p = ' ';
-
-    size_t need = (tl > 0 ? (size_t)tl + 4 : 0) + (size_t)bl + 1;  /* "# " + t + "\n\n" + body */
-    char* buf = malloc(need);
-    if (!buf) { free(t); free(b); return; }
+    int bl = GetWindowTextLengthA(nw->tab[i].edit);
+    char* b = malloc((size_t)bl + 1); if (!b) return;
+    GetWindowTextA(nw->tab[i].edit, b, bl + 1);
+    int tl = (int)strlen(m->name);
+    size_t need = (tl > 0 ? (size_t)tl + 4 : 0) + (size_t)bl + 1;
+    char* buf = malloc(need); if (!buf) { free(b); return; }
     size_t off = 0;
-    if (tl > 0) off += (size_t)sprintf(buf + off, "# %s\n\n", t);
+    if (tl > 0) off += (size_t)sprintf(buf + off, "# %s\n\n", m->name);
     memcpy(buf + off, b, (size_t)bl); off += (size_t)bl;
-
     char path[260];
     app_note_path(nw->app, m, path, sizeof path);
     store_write_note(path, buf, off);
-
-    snprintf(m->name, sizeof m->name, "%s", t);
-    SetWindowTextA(GetParent(nw->title), m->name[0] ? m->name : "quickNote");
-    free(buf); free(b); free(t);
+    free(buf); free(b);
 }
 
 /* Persist window geometry, but only when the window is in its normal state.
  * A minimized window's GetWindowRect is (-32000,-32000); a maximized one is
  * the whole work area. Saving either would lose the user's real placement, so
  * skip and keep the last good values. */
-static void nw_save_geometry(HWND hwnd, NoteMeta* m) {
-    if (!m || IsIconic(hwnd) || IsZoomed(hwnd)) return;
+static void nw_save_geometry(HWND hwnd, WinMeta* w) {
+    if (!w || IsIconic(hwnd) || IsZoomed(hwnd)) return;
     RECT wr; GetWindowRect(hwnd, &wr);
-    m->x = wr.left; m->y = wr.top;
-    m->w = wr.right - wr.left; m->h = wr.bottom - wr.top;
+    w->x = wr.left; w->y = wr.top;
+    w->w = wr.right - wr.left; w->h = wr.bottom - wr.top;
 }
 
 /*
@@ -436,7 +410,7 @@ static void nw_save_geometry(HWND hwnd, NoteMeta* m) {
  * Fix (option b — clean): nw_apply_format uses EM_GETTEXTEX with GT_DEFAULT and
  * CP_ACP, which returns the text with \r-only paragraph separators (matching
  * RichEdit's internal indexing).  The resulting byte offsets from markdown_spans
- * are correct for EM_EXSETSEL.  nw_save_content is unaffected — it still uses
+ * are correct for EM_EXSETSEL.  nw_save_tab is unaffected — it still uses
  * GetWindowTextA whose \r\n output is correct for .md files on Windows.
  *
  * md4c treats bare \r as a valid line ending (CommonMark §2.3), so parsing is
@@ -565,63 +539,70 @@ static void nw_apply_lists(HWND edit, const char* buf, int len) {
     }
 }
 
-static void nw_apply_format(NoteWin* nw) {
+/* Live markdown restyle of one tab's body RichEdit. */
+static void nw_apply_format_edit(NoteWin* nw, int i) {
+    HWND edit = nw->tab[i].edit;
     /* Applying CHARFORMAT makes RichEdit emit EN_CHANGE/EN_UPDATE. Without
      * suppressing them, each reformat re-arms the debounce timer and we loop
      * forever (constant reflow = flicker + the text never settles formatted).
      * Mute notifications for the duration of the programmatic restyle. */
-    SendMessageW(nw->edit, EM_SETEVENTMASK, 0, 0);
+    SendMessageW(edit, EM_SETEVENTMASK, 0, 0);
 
     /* Use EM_GETTEXTEX with GT_DEFAULT + CP_ACP: returns \r-only line endings
      * whose byte offsets match RichEdit's internal character positions exactly. */
     GETTEXTLENGTHEX gtl; gtl.flags = GTL_DEFAULT; gtl.codepage = CP_ACP;
-    int len = (int)SendMessageW(nw->edit, EM_GETTEXTLENGTHEX, (WPARAM)&gtl, 0);
-    if (len <= 0) { SendMessageW(nw->edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK); return; }
+    int len = (int)SendMessageW(edit, EM_GETTEXTLENGTHEX, (WPARAM)&gtl, 0);
+    if (len <= 0) { SendMessageW(edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK); return; }
     char* buf = malloc((size_t)len + 1);
-    if (!buf) { SendMessageW(nw->edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK); return; }
+    if (!buf) { SendMessageW(edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK); return; }
     GETTEXTEX gte; gte.cb = (DWORD)(len + 1); gte.flags = GT_DEFAULT;
     gte.codepage = CP_ACP; gte.lpDefaultChar = NULL; gte.lpUsedDefChar = NULL;
-    SendMessageW(nw->edit, EM_GETTEXTEX, (WPARAM)&gte, (LPARAM)buf);
+    SendMessageW(edit, EM_GETTEXTEX, (WPARAM)&gte, (LPARAM)buf);
 
     /* capture real caret BEFORE any selection changes */
     CHARRANGE saved_sel;
-    SendMessageW(nw->edit, EM_EXGETSEL, 0, (LPARAM)&saved_sel);
+    SendMessageW(edit, EM_EXGETSEL, 0, (LPARAM)&saved_sel);
 
     /* reset everything to default first */
     CHARRANGE all = { 0, -1 };
-    SendMessageW(nw->edit, EM_EXSETSEL, 0, (LPARAM)&all);
+    SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&all);
     CHARFORMAT2W base; memset(&base, 0, sizeof base); base.cbSize = sizeof base;
     /* CFM_HIDDEN (effect off) un-hides everything so deleted/moved markers
      * reappear before we re-hide the current ones. */
     base.dwMask = CFM_BOLD|CFM_ITALIC|CFM_STRIKEOUT|CFM_SIZE|CFM_FACE|CFM_COLOR|CFM_HIDDEN;
     base.yHeight = 200; base.crTextColor = COL_TEXT; wcscpy(base.szFaceName, L"Segoe UI");
-    SendMessageW(nw->edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&base);
+    SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&base);
 
     MdSpan spans[256];
     size_t n = markdown_spans(buf, (size_t)len, spans, 256);
     if (n > 256) n = 256;
-    for (size_t i = 0; i < n; i++) {
-        nw_set_range_fmt(nw->edit, spans[i].start, spans[i].len, spans[i].fmt);
-        nw_apply_hidden(nw->edit, buf, len, &spans[i]);   /* consume markers */
+    for (size_t k = 0; k < n; k++) {
+        nw_set_range_fmt(edit, spans[k].start, spans[k].len, spans[k].fmt);
+        nw_apply_hidden(edit, buf, len, &spans[k]);   /* consume markers */
     }
-    nw_apply_lists(nw->edit, buf, len);     /* render "- "/"N. " as bullets/numbers */
+    nw_apply_lists(edit, buf, len);     /* render "- "/"N. " as bullets/numbers */
     free(buf);
 
     /* restore the real caret/selection */
-    SendMessageW(nw->edit, EM_EXSETSEL, 0, (LPARAM)&saved_sel);
+    SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&saved_sel);
 
     /* re-enable change + key notifications now that the restyle is done */
-    SendMessageW(nw->edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
+    SendMessageW(edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
+}
+
+static void nw_apply_format(NoteWin* nw) {
+    if (nw->ntabs > 0) nw_apply_format_edit(nw, nw->active);
 }
 
 /* Persist + restyle the body now (used after a programmatic edit), with redraw
  * suppressed to avoid flicker. */
 static void nw_reformat_now(NoteWin* nw) {
-    SendMessageW(nw->edit, WM_SETREDRAW, FALSE, 0);
-    nw_save_content(nw);
+    HWND e = nw_edit(nw);
+    SendMessageW(e, WM_SETREDRAW, FALSE, 0);
+    nw_save_tab(nw, nw->active);
     nw_apply_format(nw);
-    SendMessageW(nw->edit, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(nw->edit, NULL, TRUE);
+    SendMessageW(e, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(e, NULL, TRUE);
     nw_update_toggles(nw);    /* apply_format muted EN_SELCHANGE; refresh now */
 }
 
@@ -644,7 +625,7 @@ static int nw_marker_len(const char* buf, int len, LONG p) {
  * The live formatter then renders + hides the markers. */
 static void nw_wrap_inline(NoteWin* nw, const char* marker, int idx) {
     if (nw_caret_on_heading(nw)) return;     /* headings are hard H1 */
-    HWND e = nw->edit;
+    HWND e = nw_edit(nw);
     int mlen = (int)strlen(marker);
     wchar_t wmark[8];
     for (int k = 0; k < mlen; k++) wmark[k] = (wchar_t)marker[k];
@@ -669,7 +650,7 @@ static void nw_wrap_inline(NoteWin* nw, const char* marker, int idx) {
             nw_reformat_now(nw);
             return;
         }
-        if (idx >= 0 && idx < NUM_BTNS && nw->active[idx]) {  /* inside this fmt */
+        if (idx >= 0 && idx < NUM_BTNS && nw->active_fmt[idx]) {  /* inside this fmt */
             LONG cpos = -1;                    /* find closing marker on this line */
             for (LONG p = a; p + mlen <= len; p++) {
                 if (buf[p] == '\r' || buf[p] == '\n') break;
@@ -735,7 +716,7 @@ static void nw_wrap_inline(NoteWin* nw, const char* marker, int idx) {
  * the other kind in place). The live formatter turns markers into bullets. */
 static void nw_list_prefix(NoteWin* nw, int numbered) {
     if (nw_caret_on_heading(nw)) return;     /* headings are hard H1 */
-    HWND e = nw->edit;
+    HWND e = nw_edit(nw);
     SendMessageW(e, EM_SETEVENTMASK, 0, 0);
     CHARRANGE sel; SendMessageW(e, EM_EXGETSEL, 0, (LPARAM)&sel);
     int len; char* buf = nw_body_text(e, &len);
@@ -815,7 +796,7 @@ static void nw_list_prefix(NoteWin* nw, int numbered) {
  * marker to leave the list. Returns 1 if it handled Enter (caller consumes it),
  * 0 to let RichEdit insert a normal newline. */
 static int nw_handle_enter(NoteWin* nw) {
-    HWND e = nw->edit;
+    HWND e = nw_edit(nw);
     CHARRANGE sel; SendMessageW(e, EM_EXGETSEL, 0, (LPARAM)&sel);
     int len; char* buf = nw_body_text(e, &len);
     if (!buf) return 0;
@@ -851,21 +832,23 @@ static int nw_handle_enter(NoteWin* nw) {
     return 1;
 }
 
-/* Spawn a new note offset from this one. */
+/* Spawn a new note in a brand-new window (offset from this one). */
 static void nw_new_note(NoteWin* nw) {
+    WinMeta* cur = nw_win(nw);       /* read coords BEFORE app_new_window (may realloc) */
     int ox = 224, oy = 224;
-    NoteMeta* cur = nw_meta(nw);     /* read coords BEFORE app_new_note (it may realloc) */
     if (cur) { ox = cur->x + 24; oy = cur->y + 24; }
-    NoteMeta* m = app_new_note(nw->app);
-    if (m) { m->x = ox; m->y = oy; note_window_open(nw->app, m); }
+    WinMeta* w = app_new_window(nw->app);
+    if (w) { w->x = ox; w->y = oy; note_window_open(nw->app, w); }
 }
 
-/* Delete this note (with confirmation), removing its .md and index entry. */
+/* Delete the active note (with confirmation), removing its .md and index entry. */
 static void nw_delete_note(NoteWin* nw, HWND hwnd) {
     if (MessageBoxW(hwnd, L"Delete this note permanently?",
                     L"Delete", MB_YESNO | MB_ICONWARNING) != IDYES) return;
+    NoteTab* t = nw_cur(nw);
+    if (!t) return;
     /* Capture before DestroyWindow: WM_DESTROY frees nw synchronously. */
-    char id[16]; strcpy(id, nw->id);
+    char id[16]; strcpy(id, t->id);
     AppState* app = nw->app;
     DestroyWindow(hwnd);
     app_delete_note(app, id);
@@ -936,27 +919,28 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 
-        /* Title: single-line H1 box (no ES_MULTILINE). */
-        nw->title = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            0, 0, 100, TITLEBAR_H, hwnd, (HMENU)ID_TITLE, cs->hInstance, NULL);
-        SendMessageW(nw->title, EM_SETBKGNDCOLOR, 0, (LPARAM)COL_BG);
-        SendMessageW(nw->title, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
-        nw_style_title(nw->title);
-
-        nw->edit = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
-            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
-            0, 0, 100, 100, hwnd, (HMENU)ID_EDIT, cs->hInstance, NULL);
-        /* dark background + text color for RichEdit */
-        SendMessageW(nw->edit, EM_SETBKGNDCOLOR, 0, (LPARAM)COL_BG);
-        CHARFORMAT2W cf; memset(&cf, 0, sizeof cf);
-        cf.cbSize = sizeof cf; cf.dwMask = CFM_COLOR; cf.crTextColor = COL_TEXT;
-        SendMessageW(nw->edit, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
-        SendMessageW(nw->edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
-        nw_load_content(nw);
+        /* one body RichEdit per tab; active shown, rest hidden */
+        WinMeta* w = prefs_find_window(&nw->app->prefs, nw->win_id);
+        nw->ntabs = w ? w->ntabs : 0;
+        if (nw->ntabs > WIN_MAX_TABS) nw->ntabs = WIN_MAX_TABS;
+        nw->active = (w && w->active < nw->ntabs) ? w->active : 0;
+        for (int i = 0; i < nw->ntabs; i++) {
+            snprintf(nw->tab[i].id, sizeof nw->tab[i].id, "%s", w->tabs[i]);
+            nw->tab[i].edit = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
+                WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL
+                  | (i == nw->active ? WS_VISIBLE : 0),
+                0, 0, 100, 100, hwnd, (HMENU)ID_EDIT, cs->hInstance, NULL);
+            SendMessageW(nw->tab[i].edit, EM_SETBKGNDCOLOR, 0, (LPARAM)COL_BG);
+            CHARFORMAT2W cf; memset(&cf, 0, sizeof cf);
+            cf.cbSize = sizeof cf; cf.dwMask = CFM_COLOR; cf.crTextColor = COL_TEXT;
+            SendMessageW(nw->tab[i].edit, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
+            SendMessageW(nw->tab[i].edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
+            nw_load_tab(nw, i);
+            nw_apply_format_edit(nw, i);    /* style each loaded body */
+        }
         nw_layout(hwnd, nw);
         nw_update_toggles(nw);
-        SetFocus(nw->edit);
+        if (nw_edit(nw)) SetFocus(nw_edit(nw));
         return 0;
     }
     case WM_SIZE:
@@ -980,6 +964,21 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         RECT hline = { 0, hy, rc.right, hy + 1 };           /* full-width divider */
         FillRect(hdc, &vline, g_border_brush);
         FillRect(hdc, &hline, g_border_brush);
+
+        /* active note's name as plain text in the title bar (tab strip: Task 6) */
+        NoteMeta* am = (nw && nw->ntabs > 0) ? nw_note_meta(nw, nw->active) : NULL;
+        if (am) {
+            RECT tr; int dummy;
+            nw_regions(hwnd, &tr, NULL, &dummy, &dummy);
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, COL_TEXT);
+            HFONT f = CreateFontW(-18,0,0,0,FW_SEMIBOLD,0,0,0,0,0,0,0,0,L"Segoe UI");
+            HFONT old = (HFONT)SelectObject(hdc, f);
+            wchar_t wname[128];
+            MultiByteToWideChar(CP_ACP, 0, am->name, -1, wname, 128);
+            DrawTextW(hdc, wname, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            SelectObject(hdc, old); DeleteObject(f);
+        }
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -1018,7 +1017,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_SETFOCUS:
-        if (nw) SetFocus(nw->edit);   /* keep focus on the editor */
+        if (nw && nw_edit(nw)) SetFocus(nw_edit(nw));   /* keep focus on the editor */
         return 0;
     case WM_NOTIFY: {
         NMHDR* hdr = (NMHDR*)lp;
@@ -1026,21 +1025,10 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             nw_update_toggles(nw);
             return 0;
         }
-        if (nw && hdr->code == EN_SELCHANGE && hdr->idFrom == ID_TITLE) {
-            nw_clear_toggles(nw);   /* title is hard H1; nothing to highlight */
-            return 0;
-        }
-        if (nw && hdr->code == EN_MSGFILTER &&
-            (hdr->idFrom == ID_EDIT || hdr->idFrom == ID_TITLE)) {
+        if (nw && hdr->code == EN_MSGFILTER && hdr->idFrom == ID_EDIT) {
             MSGFILTER* mf = (MSGFILTER*)lp;
-            /* Enter in the title moves to the body instead of being eaten. */
-            if (hdr->idFrom == ID_TITLE && mf->msg == WM_KEYDOWN &&
-                mf->wParam == VK_RETURN) {
-                SetFocus(nw->edit);
-                return 1;
-            }
             /* Enter in the body continues a list item, if on one. */
-            if (hdr->idFrom == ID_EDIT && mf->msg == WM_KEYDOWN &&
+            if (mf->msg == WM_KEYDOWN &&
                 mf->wParam == VK_RETURN && nw_handle_enter(nw)) {
                 return 1;
             }
@@ -1053,9 +1041,9 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_EXITSIZEMOVE: {
         if (!nw) return 0;
-        NoteMeta* m = nw_meta(nw);
-        if (!m) return 0;
-        nw_save_geometry(hwnd, m);
+        WinMeta* w = nw_win(nw);
+        if (!w) return 0;
+        nw_save_geometry(hwnd, w);
         return 0;
     }
     case WM_DRAWITEM:
@@ -1081,22 +1069,22 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             case IDW_CLOSE:  SendMessageW(hwnd, WM_CLOSE, 0, 0); return 0;
             default: return 0;
             }
-            SetFocus(nw->edit);   /* return focus to the body after a click */
+            if (nw_edit(nw)) SetFocus(nw_edit(nw));   /* return focus to the body after a click */
             return 0;
         }
-        if (HIWORD(wp) == EN_CHANGE &&
-            (LOWORD(wp) == ID_EDIT || LOWORD(wp) == ID_TITLE)) {
+        if (HIWORD(wp) == EN_CHANGE && LOWORD(wp) == ID_EDIT) {
             SetTimer(hwnd, IDT_DEBOUNCE, DEBOUNCE_MS, NULL);  /* coalesces */
         }
         return 0;
     case WM_TIMER:
-        if (wp == IDT_DEBOUNCE && nw) {
+        if (wp == IDT_DEBOUNCE && nw && nw_edit(nw)) {
+            HWND e = nw_edit(nw);
             KillTimer(hwnd, IDT_DEBOUNCE);
-            SendMessageW(nw->edit, WM_SETREDRAW, FALSE, 0);
-            nw_save_content(nw);
+            SendMessageW(e, WM_SETREDRAW, FALSE, 0);
+            nw_save_tab(nw, nw->active);
             nw_apply_format(nw);
-            SendMessageW(nw->edit, WM_SETREDRAW, TRUE, 0);
-            InvalidateRect(nw->edit, NULL, TRUE);
+            SendMessageW(e, WM_SETREDRAW, TRUE, 0);
+            InvalidateRect(e, NULL, TRUE);
             nw_update_toggles(nw);
         }
         return 0;
@@ -1128,20 +1116,19 @@ void note_window_register_class(HINSTANCE hInst) {
     RegisterClassExW(&wc);
 }
 
-HWND note_window_open(AppState* app, NoteMeta* meta) {
+HWND note_window_open(AppState* app, WinMeta* win) {
     NoteWin* nw = calloc(1, sizeof *nw);
     if (!nw) return NULL;
     nw->app = app;
-    snprintf(nw->id, sizeof nw->id, "%s", meta->id);
-    meta->open = true;
+    snprintf(nw->win_id, sizeof nw->win_id, "%s", win->id);
     /* Standard overlapped window (native frame: resize, snap, shadow, system
      * menu, taskbar), but WM_NCCALCSIZE extends the client over the caption so
      * the title bar (icon, name, min/max/close) is drawn by us. */
     HWND h = CreateWindowExW(0, NOTE_CLASS, L"quickNote",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VISIBLE,
-        meta->x, meta->y, meta->w, meta->h,
+        win->x, win->y, win->w, win->h,
         NULL, NULL, GetModuleHandleW(NULL), nw);
-    if (h) nw_registry_add(nw->id, h);
+    if (h) nw_registry_add(nw->win_id, h);
     else   free(nw);
     return h;
 }
@@ -1149,12 +1136,31 @@ HWND note_window_open(AppState* app, NoteMeta* meta) {
 void note_window_close(HWND hwnd) {
     NoteWin* nw = nw_get(hwnd);
     if (nw) {
-        NoteMeta* m = nw_meta(nw);
-        if (m) {
-            nw_save_geometry(hwnd, m);
-            nw_save_content(nw);
-            m->open = false;
+        WinMeta* w = nw_win(nw);
+        if (w) {
+            nw_save_geometry(hwnd, w);
+            for (int i = 0; i < nw->ntabs; i++) nw_save_tab(nw, i);
+            w->active = nw->active;
+            /* window stays in prefs.windows with its tab list (reopened next launch) */
         }
     }
     DestroyWindow(hwnd);
+}
+
+void note_window_activate_note(HWND hwnd, const char* note_id) {
+    NoteWin* nw = nw_get(hwnd);
+    if (!nw) return;
+    for (int t = 0; t < nw->ntabs; t++) {
+        if (strcmp(nw->tab[t].id, note_id) == 0) {
+            if (t != nw->active) {
+                ShowWindow(nw->tab[nw->active].edit, SW_HIDE);
+                nw->active = t;
+                ShowWindow(nw->tab[t].edit, SW_SHOW);
+                InvalidateRect(hwnd, NULL, TRUE);
+            }
+            break;
+        }
+    }
+    SetForegroundWindow(hwnd);
+    if (nw_edit(nw)) SetFocus(nw_edit(nw));
 }

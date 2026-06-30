@@ -4,8 +4,10 @@
 #include "app.h"
 
 void note_window_register_class(HINSTANCE hInst);
-HWND note_window_open(AppState* app, NoteMeta* meta);
+HWND note_window_open(AppState* app, WinMeta* win);
+HWND note_window_find_open_window(const char* win_id);
+HWND note_window_find_by_note(const char* note_id);
+void note_window_activate_note(HWND hwnd, const char* note_id);
 void note_window_close(HWND hwnd);
-HWND note_window_find_open(const char* id);   /* live HWND for an open note id, or NULL */
 
 #endif

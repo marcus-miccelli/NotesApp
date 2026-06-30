@@ -9,14 +9,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show) {
     if (!app_init(&app, NULL)) return 1;
     note_window_register_class(hInst);
 
-    /* open every note marked open; if none, create one */
-    int opened = 0;
-    for (size_t i = 0; i < app.prefs.count; i++) {
-        if (app.prefs.notes[i].open) { note_window_open(&app, &app.prefs.notes[i]); opened++; }
-    }
-    if (opened == 0) {
-        NoteMeta* m = app_new_note(&app);
-        if (m) note_window_open(&app, m);
+    /* open every saved window; on first run create one window + note */
+    if (app.prefs.wcount == 0) {
+        WinMeta* w = app_new_window(&app);     /* first run: one window, one note */
+        if (w) note_window_open(&app, w);
+    } else {
+        for (size_t i = 0; i < app.prefs.wcount; i++)
+            note_window_open(&app, &app.prefs.windows[i]);
     }
 
     if (!tray_init(&app, hInst)) return 1;
