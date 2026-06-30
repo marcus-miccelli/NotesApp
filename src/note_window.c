@@ -903,6 +903,40 @@ static void nw_activate(NoteWin* nw, HWND hwnd, int i) {
     nw_update_toggles(nw);
 }
 
+/* Shared tab-removal helper: the edit for tab i MUST already be destroyed by
+ * the caller (nw_close_tab saves first; nw_delete_note skips save).  Shifts
+ * tab[] down, decrements ntabs, and either closes the window (if it was the
+ * last tab) or fixes active + redraws. */
+static void nw_remove_tab(NoteWin* nw, HWND hwnd, int i) {
+    for (int k = i; k < nw->ntabs - 1; k++) nw->tab[k] = nw->tab[k+1];
+    nw->ntabs--;
+    if (nw->ntabs == 0) {
+        WinMeta* w = nw_win(nw);
+        if (w) prefs_remove_window(&nw->app->prefs, w->id);
+        DestroyWindow(hwnd);
+        return;   /* WM_DESTROY frees nw — do NOT touch nw after this */
+    }
+    if (nw->active >= nw->ntabs) nw->active = nw->ntabs - 1;
+    else if (i < nw->active)     nw->active--;
+    ShowWindow(nw->tab[nw->active].edit, SW_SHOW);
+    nw_layout(hwnd, nw);
+    nw_sync_winmeta(nw);
+    InvalidateRect(hwnd, NULL, TRUE);
+    SetFocus(nw->tab[nw->active].edit);
+    nw_update_toggles(nw);
+}
+
+/* Close tab i: save its content, destroy its edit, then remove it from the
+ * window.  If it was the last tab the window itself closes. */
+static void nw_close_tab(NoteWin* nw, HWND hwnd, int i) {
+    if (i < 0 || i >= nw->ntabs) return;
+    nw_save_tab(nw, i);
+    if (nw->tab[i].edit) DestroyWindow(nw->tab[i].edit);
+    nw->tab[i].edit = NULL;
+    nw_remove_tab(nw, hwnd, i);
+    /* nw_remove_tab may have destroyed hwnd; do not touch nw after this */
+}
+
 /* Create a new note + its body RichEdit as a new tab and make it active. */
 static void nw_add_tab(NoteWin* nw, HWND hwnd) {
     if (nw->ntabs >= WIN_MAX_TABS) return;
@@ -938,17 +972,22 @@ static void __attribute__((unused)) nw_new_note(NoteWin* nw) {
     if (w) { w->x = ox; w->y = oy; note_window_open(nw->app, w); }
 }
 
-/* Delete the active note (with confirmation), removing its .md and index entry. */
+/* Delete the active note (with confirmation), removing its .md and index entry.
+ * Reuses nw_remove_tab so only the deleted tab is removed; if it was the last
+ * tab the window closes.  No save — the note is being deleted. */
 static void nw_delete_note(NoteWin* nw, HWND hwnd) {
     if (MessageBoxW(hwnd, L"Delete this note permanently?",
                     L"Delete", MB_YESNO | MB_ICONWARNING) != IDYES) return;
-    NoteTab* t = nw_cur(nw);
-    if (!t) return;
-    /* Capture before DestroyWindow: WM_DESTROY frees nw synchronously. */
-    char id[16]; strcpy(id, t->id);
+    int i = nw->active;
+    if (i < 0 || i >= nw->ntabs) return;
+    char id[16]; strcpy(id, nw->tab[i].id);
     AppState* app = nw->app;
-    DestroyWindow(hwnd);
+    /* Destroy the edit first (no save), then delete from disk, then remove tab. */
+    if (nw->tab[i].edit) DestroyWindow(nw->tab[i].edit);
+    nw->tab[i].edit = NULL;
     app_delete_note(app, id);
+    nw_remove_tab(nw, hwnd, i);
+    /* nw_remove_tab may have destroyed hwnd; do not touch nw after this */
 }
 
 /* Handle shortcuts forwarded from a RichEdit via EN_MSGFILTER. Returns nonzero
@@ -1143,9 +1182,16 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (nw) {
             int idx = -1;
             TabHit h = nw_tab_hit(nw, hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &idx);
-            if (h == HIT_PLUS) { nw_add_tab(nw, hwnd); return 0; }
-            if (h == HIT_TAB)  { nw_activate(nw, hwnd, idx); return 0; }
-            /* HIT_CLOSE handled in Task 8 */
+            if (h == HIT_PLUS)  { nw_add_tab(nw, hwnd); return 0; }
+            if (h == HIT_TAB)   { nw_activate(nw, hwnd, idx); return 0; }
+            if (h == HIT_CLOSE) { nw_close_tab(nw, hwnd, idx); return 0; }
+        }
+        return 0;
+    case WM_MBUTTONDOWN:
+        if (nw) {
+            int idx = -1;
+            TabHit h = nw_tab_hit(nw, hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &idx);
+            if (h == HIT_TAB || h == HIT_CLOSE) { nw_close_tab(nw, hwnd, idx); return 0; }
         }
         return 0;
     case WM_NOTIFY: {
@@ -1270,7 +1316,9 @@ void note_window_close(HWND hwnd) {
             nw_save_geometry(hwnd, w);
             for (int i = 0; i < nw->ntabs; i++) nw_save_tab(nw, i);
             w->active = nw->active;
-            /* window stays in prefs.windows with its tab list (reopened next launch) */
+            /* Remove from prefs: the X-closed window should not reopen next launch.
+             * The notes themselves remain in prefs.notes and on disk. */
+            prefs_remove_window(&nw->app->prefs, w->id);
         }
     }
     DestroyWindow(hwnd);
