@@ -95,6 +95,11 @@ static const char* json_str(const cJSON* o, const char* k, const char* dflt) {
     const cJSON* v = cJSON_GetObjectItemCaseSensitive(o, k);
     return (cJSON_IsString(v) && v->valuestring) ? v->valuestring : dflt;
 }
+static bool json_bool(const cJSON* o, const char* k, bool dflt) {
+    const cJSON* v = cJSON_GetObjectItemCaseSensitive(o, k);
+    if (cJSON_IsBool(v)) return cJSON_IsTrue(v);
+    return dflt;
+}
 bool prefs_load(Prefs* p, const char* json_path) {
     prefs_init_default(p);
     FILE* f = fopen(json_path, "rb");
@@ -121,6 +126,9 @@ bool prefs_load(Prefs* p, const char* json_path) {
     p->version = json_int(root, "version", 1);
     copy_str(p->theme, sizeof p->theme, json_str(root, "theme", "dark"), "dark");
 
+    int has_windows = cJSON_GetObjectItemCaseSensitive(root, "windows") != NULL;
+    int legacy = (p->version < 2) || !has_windows;
+
     const cJSON* arr = cJSON_GetObjectItemCaseSensitive(root, "notes");
     const cJSON* it = NULL;
     cJSON_ArrayForEach(it, arr) {
@@ -131,31 +139,47 @@ bool prefs_load(Prefs* p, const char* json_path) {
         if (!m) break;
         copy_str(m->name, sizeof m->name, json_str(it, "name", ""), "");
         copy_str(m->color, sizeof m->color, json_str(it, "color", "slate"), "slate");
+
+        if (legacy && json_bool(it, "open", true)) {
+            /* one window per previously-open note, keeping its geometry */
+            char wid[16];
+            snprintf(wid, sizeof wid, "mw%zu", p->wcount);
+            WinMeta* w = prefs_add_window(p, wid);
+            if (w) {
+                w->x = json_int(it, "x", 200);
+                w->y = json_int(it, "y", 200);
+                w->w = json_int(it, "w", 480);
+                w->h = json_int(it, "h", 360);
+                w->ntabs = 1; w->active = 0;
+                copy_str(w->tabs[0], sizeof w->tabs[0], id, "");
+            }
+        }
     }
 
-    const cJSON* warr = cJSON_GetObjectItemCaseSensitive(root, "windows");
-    const cJSON* wit = NULL;
-    cJSON_ArrayForEach(wit, warr) {
-        const char* id = json_str(wit, "id", NULL);
-        if (!id) continue;
-        WinMeta* w = prefs_add_window(p, id);
-        if (!w) break;
-        w->x = json_int(wit, "x", 200);
-        w->y = json_int(wit, "y", 200);
-        w->w = json_int(wit, "w", 480);
-        w->h = json_int(wit, "h", 360);
-        w->active = json_int(wit, "active", 0);
-        const cJSON* tabs = cJSON_GetObjectItemCaseSensitive(wit, "tabs");
-        const cJSON* tit = NULL;
-        w->ntabs = 0;
-        cJSON_ArrayForEach(tit, tabs) {
-            if (w->ntabs >= WIN_MAX_TABS) break;
-            if (cJSON_IsString(tit) && tit->valuestring)
-                copy_str(w->tabs[w->ntabs++], sizeof w->tabs[0], tit->valuestring, "");
+    if (!legacy) {
+        const cJSON* warr = cJSON_GetObjectItemCaseSensitive(root, "windows");
+        const cJSON* wit = NULL;
+        cJSON_ArrayForEach(wit, warr) {
+            const char* id = json_str(wit, "id", NULL);
+            if (!id) continue;
+            WinMeta* w = prefs_add_window(p, id);
+            if (!w) break;
+            w->x = json_int(wit, "x", 200);
+            w->y = json_int(wit, "y", 200);
+            w->w = json_int(wit, "w", 480);
+            w->h = json_int(wit, "h", 360);
+            w->active = json_int(wit, "active", 0);
+            const cJSON* tabs = cJSON_GetObjectItemCaseSensitive(wit, "tabs");
+            const cJSON* tit = NULL;
+            w->ntabs = 0;
+            cJSON_ArrayForEach(tit, tabs) {
+                if (w->ntabs >= WIN_MAX_TABS) break;
+                if (cJSON_IsString(tit) && tit->valuestring)
+                    copy_str(w->tabs[w->ntabs++], sizeof w->tabs[0], tit->valuestring, "");
+            }
+            if (w->active >= w->ntabs) w->active = w->ntabs ? w->ntabs - 1 : 0;
         }
-        if (w->active >= w->ntabs) w->active = w->ntabs ? w->ntabs - 1 : 0;
     }
-    /* migration for v1 files happens in Task 3, inserted here */
 
     cJSON_Delete(root);
     return true;

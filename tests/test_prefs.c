@@ -86,3 +86,30 @@ void test_prefs(void) {
     remove(corrupt_path);
     remove(bak_path);
 }
+
+void test_prefs_migration(void) {
+    /* hand-write a v1 prefs: two notes, one open (with geometry), one closed */
+    const char* path = "C:\\tmp\\sntest_prefs_v1.json";
+    const char* v1 =
+        "{\"version\":1,\"theme\":\"dark\",\"notes\":["
+        "{\"id\":\"open01\",\"file\":\"open01.md\",\"name\":\"Open\","
+        "\"x\":11,\"y\":22,\"w\":333,\"h\":444,\"color\":\"slate\",\"open\":true},"
+        "{\"id\":\"shut01\",\"file\":\"shut01.md\",\"name\":\"Shut\","
+        "\"x\":1,\"y\":2,\"w\":3,\"h\":4,\"color\":\"slate\",\"open\":false}"
+        "]}";
+    FILE* f = fopen(path, "wb");
+    CHECK(f != NULL);
+    if (f) { fputs(v1, f); fclose(f); }
+
+    Prefs p;
+    CHECK(prefs_load(&p, path));
+    CHECK(p.count == 2);                 /* both notes kept */
+    CHECK(p.wcount == 1);                /* one window for the open note */
+    WinMeta* w = &p.windows[0];
+    CHECK(w->ntabs == 1);
+    CHECK_STR(w->tabs[0], "open01");
+    CHECK(w->x == 11 && w->y == 22 && w->w == 333 && w->h == 444);
+    CHECK(prefs_find(&p, "shut01") != NULL);   /* closed note still present */
+    prefs_free(&p);
+    remove(path);
+}

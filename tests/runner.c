@@ -9,6 +9,7 @@ void test_smoke(void);
 void test_paths(void);
 void test_store(void);
 void test_prefs(void);
+void test_prefs_migration(void);
 void test_markdown(void);
 void test_app(void);
 
@@ -17,6 +18,7 @@ int main(void) {
     test_paths();
     test_store();
     test_prefs();
+    test_prefs_migration();
     test_markdown();
     test_app();
     printf("\n%d checks, %d failed\n", g_tests_run, g_tests_failed);
