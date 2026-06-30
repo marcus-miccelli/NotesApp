@@ -880,8 +880,57 @@ static int nw_handle_enter(NoteWin* nw) {
     return 1;
 }
 
-/* Spawn a new note in a brand-new window (offset from this one). */
-static void nw_new_note(NoteWin* nw) {
+/* Mirror the runtime tab[] / active / ntabs into the persisted WinMeta so
+ * that preferences / registry stay correct after add or activate. */
+static void nw_sync_winmeta(NoteWin* nw) {
+    WinMeta* w = nw_win(nw);
+    if (!w) return;
+    w->ntabs = nw->ntabs; w->active = nw->active;
+    for (int i = 0; i < nw->ntabs; i++)
+        snprintf(w->tabs[i], sizeof w->tabs[i], "%s", nw->tab[i].id);
+}
+
+/* Show tab i, hide the previous active one. No-op if i is invalid or already
+ * the active tab. */
+static void nw_activate(NoteWin* nw, HWND hwnd, int i) {
+    if (i < 0 || i >= nw->ntabs || i == nw->active) return;
+    ShowWindow(nw->tab[nw->active].edit, SW_HIDE);
+    nw->active = i;
+    ShowWindow(nw->tab[i].edit, SW_SHOW);
+    nw_sync_winmeta(nw);
+    InvalidateRect(hwnd, NULL, TRUE);
+    SetFocus(nw->tab[i].edit);
+    nw_update_toggles(nw);
+}
+
+/* Create a new note + its body RichEdit as a new tab and make it active. */
+static void nw_add_tab(NoteWin* nw, HWND hwnd) {
+    if (nw->ntabs >= WIN_MAX_TABS) return;
+    NoteMeta* m = app_new_note(nw->app);
+    if (!m) return;
+    int i = nw->ntabs++;
+    snprintf(nw->tab[i].id, sizeof nw->tab[i].id, "%s", m->id);
+    nw->tab[i].edit = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
+        WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
+        0, 0, 100, 100, hwnd, (HMENU)ID_EDIT, GetModuleHandleW(NULL), NULL);
+    SendMessageW(nw->tab[i].edit, EM_SETBKGNDCOLOR, 0, (LPARAM)COL_BG);
+    CHARFORMAT2W cf; memset(&cf, 0, sizeof cf);
+    cf.cbSize = sizeof cf; cf.dwMask = CFM_COLOR; cf.crTextColor = COL_TEXT;
+    SendMessageW(nw->tab[i].edit, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
+    SendMessageW(nw->tab[i].edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
+    nw_load_tab(nw, i);
+    nw_layout(hwnd, nw);
+    ShowWindow(nw->tab[nw->active].edit, SW_HIDE);
+    nw->active = i;
+    ShowWindow(nw->tab[i].edit, SW_SHOW);
+    nw_sync_winmeta(nw);
+    InvalidateRect(hwnd, NULL, TRUE);
+    SetFocus(nw->tab[i].edit);
+}
+
+/* Spawn a new note in a brand-new window (offset from this one).
+ * Currently unused; repurposed for Alt+N in Task 11. */
+static void __attribute__((unused)) nw_new_note(NoteWin* nw) {
     WinMeta* cur = nw_win(nw);       /* read coords BEFORE app_new_window (may realloc) */
     int ox = 224, oy = 224;
     if (cur) { ox = cur->x + 24; oy = cur->y + 24; }
@@ -911,7 +960,7 @@ static LRESULT nw_handle_key(NoteWin* nw, HWND hwnd, const MSGFILTER* mf) {
     BOOL ctrl  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     BOOL shift = (GetKeyState(VK_SHIFT)   & 0x8000) != 0;
     if (!ctrl) return 0;
-    if (mf->wParam == 'N' && !shift) { nw_new_note(nw); return 1; }
+    if (mf->wParam == 'N' && !shift) { nw_add_tab(nw, hwnd); return 1; }
     if (mf->wParam == 'D' && shift)  { nw_delete_note(nw, hwnd); return 1; }
 
     if (mf->nmhdr.idFrom == ID_EDIT) {
@@ -1075,9 +1124,9 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return HTTOP;
         }
         if (pt.y < TITLEBAR_H) {
-            /* Task 7 routes clicks through nw_tab_hit; call site established here. */
-            if (nw) (void)nw_tab_hit(nw, hwnd, pt.x, pt.y, NULL);
-            return HTCAPTION;
+            int idx; TabHit h = nw ? nw_tab_hit(nw, hwnd, pt.x, pt.y, &idx) : HIT_NONE;
+            if (h != HIT_NONE) return HTCLIENT;     /* tabs/+ handle the click */
+            return HTCAPTION;                       /* bare bar / drag gap */
         }
         return HTCLIENT;
     }
@@ -1089,6 +1138,15 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_SETFOCUS:
         if (nw && nw_edit(nw)) SetFocus(nw_edit(nw));   /* keep focus on the editor */
+        return 0;
+    case WM_LBUTTONDOWN:
+        if (nw) {
+            int idx = -1;
+            TabHit h = nw_tab_hit(nw, hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &idx);
+            if (h == HIT_PLUS) { nw_add_tab(nw, hwnd); return 0; }
+            if (h == HIT_TAB)  { nw_activate(nw, hwnd, idx); return 0; }
+            /* HIT_CLOSE handled in Task 8 */
+        }
         return 0;
     case WM_NOTIFY: {
         NMHDR* hdr = (NMHDR*)lp;
