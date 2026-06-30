@@ -66,3 +66,45 @@ bool app_delete_note(AppState* a, const char* id) {
     store_delete_note(path);
     return prefs_remove(&a->prefs, id);
 }
+
+static void app_gen_win_id(AppState* a, char* out16) {
+    /* "wXXXXXXX" hex, distinct from note ids and other window ids */
+    for (;;) {
+        char id[16]; id[0] = 'w';
+        static const char hex[] = "0123456789abcdef";
+        for (int i = 1; i < 8; i++) id[i] = hex[rand() & 0xF];
+        id[8] = '\0';
+        if (!prefs_find_window(&a->prefs, id)) { strcpy(out16, id); return; }
+    }
+}
+
+WinMeta* app_new_window(AppState* a) {
+    NoteMeta* m = app_new_note(a);
+    if (!m) return NULL;
+    char nid[16]; strcpy(nid, m->id);   /* copy: app_new_note may realloc notes */
+    char wid[16]; app_gen_win_id(a, wid);
+    WinMeta* w = prefs_add_window(&a->prefs, wid);
+    if (!w) { app_delete_note(a, nid); return NULL; }
+    w->ntabs = 1; w->active = 0;
+    strcpy(w->tabs[0], nid);
+    return w;
+}
+
+WinMeta* app_open_note_in_window(AppState* a, const char* note_id) {
+    if (!prefs_find(&a->prefs, note_id)) return NULL;
+    char wid[16]; app_gen_win_id(a, wid);
+    WinMeta* w = prefs_add_window(&a->prefs, wid);
+    if (!w) return NULL;
+    w->ntabs = 1; w->active = 0;
+    snprintf(w->tabs[0], sizeof w->tabs[0], "%s", note_id);
+    return w;
+}
+
+WinMeta* app_window_of_note(AppState* a, const char* note_id) {
+    for (size_t i = 0; i < a->prefs.wcount; i++) {
+        WinMeta* w = &a->prefs.windows[i];
+        for (int t = 0; t < w->ntabs; t++)
+            if (strcmp(w->tabs[t], note_id) == 0) return w;
+    }
+    return NULL;
+}

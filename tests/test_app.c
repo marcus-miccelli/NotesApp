@@ -31,5 +31,22 @@ void test_app(void) {
     CHECK(app_delete_note(&a, saved));
     CHECK(a.prefs.count == 0);
 
+    /* window helpers */
+    WinMeta* w = app_new_window(&a);
+    CHECK(w != NULL);
+    CHECK(w->ntabs == 1);
+    CHECK(strlen(w->tabs[0]) == 8);             /* a fresh note id */
+    CHECK(app_window_of_note(&a, w->tabs[0]) == w);
+
+    NoteMeta* extra = app_new_note(&a);
+    CHECK(extra != NULL);
+    char extra_id[16]; strcpy(extra_id, extra->id);
+    CHECK(app_window_of_note(&a, extra_id) == NULL);   /* not in any window */
+    WinMeta* w2 = app_open_note_in_window(&a, extra_id);
+    CHECK(w2 != NULL && w2 != w);
+    CHECK(w2->ntabs == 1);
+    CHECK_STR(w2->tabs[0], extra_id);
+    CHECK(app_open_note_in_window(&a, "nosuch") == NULL);
+
     app_shutdown(&a);
 }
