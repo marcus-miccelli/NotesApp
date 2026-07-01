@@ -47,7 +47,11 @@
 #define DRAG_GAP      36   /* gap between last tab/+ and the window buttons */
 #define TAB_TOP_GAP    3   /* gap between the title-bar top and a tab's top */
 #define TAB_RADIUS     7   /* rounded top-corner radius of a tab */
+#define TAB_CLOSE_W    28
 #define CTL_SIZE      18   /* uniform square for the ✕ (per tab) and the + */
+#define PLUS_W        40
+#define PLUS_H        28
+#define PLUS_OVERLAP TAB_RADIUS
 #define PLUS_GAP       8   /* gap between the last tab and the + button */
 #define TAB_MIN       48   /* minimum tab width */
 #define TAB_MAX      200   /* maximum tab width */
@@ -221,7 +225,8 @@ static int nw_strip_right(HWND hwnd) {
     return btns_l - DRAG_GAP;
 }
 static int nw_tab_w(NoteWin* nw, HWND hwnd) {
-    int avail = nw_strip_right(hwnd) - nw_strip_left() - (CTL_SIZE + PLUS_GAP);
+    int plus_visible = TITLE_CONTENT_H - TAB_TOP_GAP - 1;
+    int avail = nw_strip_right(hwnd) - nw_strip_left() - plus_visible;
     int n = nw->ntabs > 0 ? nw->ntabs : 1;
     int w = avail / n;
     if (w > TAB_MAX) w = TAB_MAX;
@@ -239,17 +244,41 @@ static void nw_tab_rect(NoteWin* nw, HWND hwnd, int i, RECT* r) {
 
 /* The uniform ✕ square inside tab i, right-aligned with a small pad. */
 static void nw_close_rect(NoteWin* nw, HWND hwnd, int i, RECT* r) {
-    RECT t; nw_tab_rect(nw, hwnd, i, &t);
-    int cx = t.right - 6 - CTL_SIZE;
-    int cy = nw_top_gutter(hwnd) + (TITLE_CONTENT_H - CTL_SIZE) / 2 + TAB_TOP_GAP / 2;
-    SetRect(r, cx, cy, cx + CTL_SIZE, cy + CTL_SIZE);
+    RECT t;
+    nw_tab_rect(nw, hwnd, i, &t);
+
+    int top = t.top + TAB_TOP_GAP;
+    int bottom = t.bottom;
+
+    SetRect(
+        r,
+        t.right - TAB_CLOSE_W,
+        top,
+        t.right,
+        bottom
+    );
 }
 /* The uniform + square, PLUS_GAP after the last tab, aligned with the ✕. */
 static void nw_plus_rect(NoteWin* nw, HWND hwnd, RECT* r) {
-    int w = nw_tab_w(nw, hwnd), l = nw_strip_left() + nw->ntabs * w + PLUS_GAP;
-    int cy = nw_top_gutter(hwnd) + (TITLE_CONTENT_H - CTL_SIZE) / 2 + TAB_TOP_GAP / 2;
-    SetRect(r, l, cy, l + CTL_SIZE, cy + CTL_SIZE);
+    int w = nw_tab_w(nw, hwnd);
+
+    int tab_top = nw_top_gutter(hwnd);
+    int top = tab_top + TAB_TOP_GAP;
+    int bottom = tab_top + TITLE_CONTENT_H;
+
+    int visible_size = bottom - top;
+    int visible_left = nw_strip_left() + nw->ntabs * w;
+
+    /* The hidden overlap tucks under the previous tab. The visible portion is square. */
+    SetRect(
+        r,
+        visible_left - PLUS_OVERLAP,
+        top,
+        visible_left + visible_size,
+        bottom
+    );
 }
+
 static TabHit nw_tab_hit(NoteWin* nw, HWND hwnd, int cx, int cy, int* out_idx) {
     int tab_top = nw_top_gutter(hwnd);
     int tab_bottom = tab_top + TITLE_CONTENT_H;
@@ -326,7 +355,7 @@ static void nw_draw_button(NoteWin* nw, const DRAWITEMSTRUCT* d) {
     DeleteObject(bg);
 
     LOGFONTW lf; memset(&lf, 0, sizeof lf);
-    lf.lfHeight = -16; lf.lfWeight = FW_BOLD; wcscpy(lf.lfFaceName, L"Segoe UI");
+    lf.lfHeight = -16; lf.lfWeight = FW_BOLD; wcscpy(lf.lfFaceName, L"IBM Plex Mono");
     if (d->CtlID == IDB_ITALIC) lf.lfItalic = TRUE;
     if (d->CtlID == IDB_STRIKE) lf.lfStrikeOut = TRUE;
     HFONT f = CreateFontIndirectW(&lf);
@@ -1117,7 +1146,7 @@ static void nw_begin_rename(NoteWin* nw, HWND hwnd) {
         WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,     /* no border — we draw an accent frame */
         er.left, er.top, er.right - er.left, er.bottom - er.top,
         hwnd, (HMENU)ID_RENAME, GetModuleHandleW(NULL), NULL);
-    nw->rename_font = CreateFontW(-14,0,0,0,FW_SEMIBOLD,0,0,0,0,0,0,0,0,L"Segoe UI");
+    nw->rename_font = CreateFontW(-14,0,0,0,FW_SEMIBOLD,0,0,0,0,0,0,0,0,L"IBM Plex Mono");
     SendMessageW(nw->rename_edit, WM_SETFONT, (WPARAM)nw->rename_font, TRUE);
     SetWindowTextA(nw->rename_edit, m && m->name[0] ? m->name : "");
     SendMessageW(nw->rename_edit, EM_SETSEL, 0, -1);
@@ -1204,51 +1233,118 @@ static void nw_fill_round_top(HDC hdc, const RECT* rc, int radius, COLORREF col)
  * (per tab, on active/hover) and the + share a uniform square. */
 static void nw_paint_tabs(NoteWin* nw, HWND hwnd, HDC hdc) {
     HFONT lf = CreateFontW(-14, 0,0,0, FW_SEMIBOLD, 0,0,0,0,0,0,0,0, L"Segoe UI");
-    HFONT gf = CreateFontW(-11, 0,0,0, FW_NORMAL,   0,0,0,0,0,0,0,0, L"Segoe UI"); /* ✕ glyph */
-    HFONT pf = CreateFontW(-15, 0,0,0, FW_NORMAL,   0,0,0,0,0,0,0,0, L"Segoe UI"); /* + glyph (matches ✕ size) */
+    HFONT gf = CreateFontW(-11, 0,0,0, FW_NORMAL,   0,0,0,0,0,0,0,0, L"Segoe UI");
+    HFONT pf = CreateFontW(-15, 0,0,0, FW_NORMAL,   0,0,0,0,0,0,0,0, L"Segoe UI");
     HFONT old = (HFONT)SelectObject(hdc, lf);
+
     SetBkMode(hdc, TRANSPARENT);
 
-    for (int i = 0; i < nw->ntabs; i++) {
-        RECT r; nw_tab_rect(nw, hwnd, i, &r);
+    const int plus_overlap = TAB_RADIUS;
+
+    /* Paint the + button fill first, behind the tabs. Its left overlap tucks
+     * underneath the final tab, so the visible part behaves like a square. */
+    RECT pr;
+    nw_plus_rect(nw, hwnd, &pr);
+
+    if (nw->hot_plus) {
+        nw_fill_round_top(hdc, &pr, TAB_RADIUS, COL_HOVER);
+    }
+
+    /* Paint every tab fill back-to-front. Inactive tabs still need a real
+     * shape so neighbour rounded-corner notches are filled consistently. */
+    for (int i = nw->ntabs - 1; i >= 0; i--) {
+        RECT r;
+        nw_tab_rect(nw, hwnd, i, &r);
+
         int isact = (i == nw->active);
         int ishot = (i == nw->hot_tab);
-        RECT shape = { r.left, r.top + TAB_TOP_GAP, r.right, r.bottom };
-        if (isact)      nw_fill_round_top(hdc, &shape, TAB_RADIUS, COL_TAB_ACT);
-        else if (ishot) nw_fill_round_top(hdc, &shape, TAB_RADIUS, COL_TAB_HOT);
+
+        int fill_left = r.left;
+        if (i > 0) fill_left -= TAB_RADIUS;
+
+        RECT shape = {
+            fill_left,
+            r.top + TAB_TOP_GAP,
+            r.right,
+            r.bottom - 1
+        };
+
+        COLORREF fill = COL_BG;
+        if (isact)      fill = COL_TAB_ACT;
+        else if (ishot) fill = COL_TAB_HOT;
+
+        nw_fill_round_top(hdc, &shape, TAB_RADIUS, fill);
+    }
+
+    /* Paint labels and close buttons after fills so overlap never covers text. */
+    for (int i = 0; i < nw->ntabs; i++) {
+        RECT r;
+        nw_tab_rect(nw, hwnd, i, &r);
+
+        int isact = (i == nw->active);
+        int ishot = (i == nw->hot_tab);
 
         NoteMeta* m = nw_note_meta(nw, i);
         wchar_t wname[128];
-        MultiByteToWideChar(CP_ACP, 0, m && m->name[0] ? m->name : "Untitled", -1, wname, 128);
-        RECT tr = { r.left + 12, r.top + TAB_TOP_GAP, r.right - CTL_SIZE - 8, r.bottom };
-        SelectObject(hdc, lf);
-        SetTextColor(hdc, isact ? COL_TEXT : (ishot ? RGB(0xc9,0xc9,0xd0) : RGB(0x8a,0x8a,0x90)));
-        DrawTextW(hdc, wname, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        MultiByteToWideChar(CP_ACP, 0,
+            m && m->name[0] ? m->name : "Untitled",
+            -1, wname, 128);
 
-        if (isact || ishot) {                         /* ✕ (uniform square) */
-            RECT xr; nw_close_rect(nw, hwnd, i, &xr);
-            int overx = (ishot && nw->hot_close);
-            if (overx) nw_fill_round(hdc, &xr, 4, RGB(0x3a,0x3a,0x40));
-            SelectObject(hdc, gf);
-            SetTextColor(hdc, overx ? RGB(0xff,0xff,0xff) : RGB(0xc0,0xc0,0xc8));
-            DrawTextW(hdc, L"\x2715", -1, &xr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        RECT tr = {
+            r.left + 12,
+            r.top + TAB_TOP_GAP,
+            r.right - TAB_CLOSE_W - 4,
+            r.bottom - 1
+        };
+
+        SelectObject(hdc, lf);
+        SetTextColor(hdc,
+            isact ? COL_TEXT :
+            (ishot ? RGB(0xc9,0xc9,0xd0) : RGB(0x8a,0x8a,0x90)));
+        DrawTextW(hdc, wname, -1, &tr,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        RECT xr;
+        nw_close_rect(nw, hwnd, i, &xr);
+
+        int overx = (ishot && nw->hot_close);
+        if (overx) {
+           nw_fill_round_top(hdc, &xr, TAB_RADIUS, RGB(0x3a,0x3a,0x40));
         }
+
+        SelectObject(hdc, gf);
+        SetTextColor(hdc, overx ? RGB(0xff,0xff,0xff) : RGB(0xc0,0xc0,0xc8));
+        DrawTextW(hdc, L"\x2715", -1, &xr,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
-    RECT pr; nw_plus_rect(nw, hwnd, &pr);             /* + (same square as ✕) */
-    if (nw->hot_plus) nw_fill_round(hdc, &pr, 4, COL_HOVER);
+    /* Draw only inside the visible square part of the + button. */
+    RECT pg = pr;
+    pg.left += plus_overlap;
+
     SelectObject(hdc, pf);
     SetTextColor(hdc, nw->hot_plus ? RGB(0xff,0xff,0xff) : RGB(0x9a,0x9a,0xa2));
-    DrawTextW(hdc, L"\x002B", -1, &pr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdc, L"\x002B", -1, &pg,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    if (nw->rename_edit) {                             /* accent frame under the rename field */
-        RECT er; nw_rename_rect(nw, hwnd, &er);
-        RECT fr = { er.left - 2, er.top - 2, er.right + 2, er.bottom + 2 };
+    if (nw->rename_edit) {
+        RECT er;
+        nw_rename_rect(nw, hwnd, &er);
+
+        RECT fr = {
+            er.left - 2,
+            er.top - 2,
+            er.right + 2,
+            er.bottom + 2
+        };
+
         nw_fill_round(hdc, &fr, 5, COL_ACCENT);
     }
 
     SelectObject(hdc, old);
-    DeleteObject(lf); DeleteObject(gf); DeleteObject(pf);
+    DeleteObject(lf);
+    DeleteObject(gf);
+    DeleteObject(pf);
 }
 
 static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
