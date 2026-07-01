@@ -39,9 +39,10 @@ strip across the title bar:
 - **Ctrl+R** — rename the active tab/note (press Enter to confirm, Escape to
   cancel)
 - **Ctrl+Shift+D** — delete the active note permanently (confirms first)
-- **Title-bar X** — close the window; all its notes stay on disk and reopen on
-  the next launch (unless the window was the last to close, in which case a
-  fresh window opens)
+- **Title-bar X** — close the window. Its notes stay on disk and remain
+  reopenable from the tray, but the closed window is not restored. On launch
+  the app reopens whichever windows were open when you last **Quit** (or a
+  fresh window if none)
 
 ### Tray
 
