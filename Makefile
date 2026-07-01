@@ -36,7 +36,7 @@ quicknote.exe: $(APP_OBJ) $(LOGIC_OBJ) $(RES_OBJ)
 
 # Resource (app icon). windres resolves the ICON path relative to the .rc dir
 # and #includes via -I.
-$(RES_OBJ): assets/app.rc assets/quicknote.ico src/resource.h
+$(RES_OBJ): assets/app.rc assets/quicknote.ico assets/app.manifest src/resource.h
 	$(WINDRES) -Isrc -Iassets -o $@ assets/app.rc
 
 test: tests.exe

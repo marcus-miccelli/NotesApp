@@ -2,3 +2,6 @@
 
 /* Lowest-ID icon -> the icon Explorer shows for the .exe. */
 IDI_APP ICON "quicknote.ico"
+
+/* RT_MANIFEST = 24; id 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID for an EXE. */
+1 24 "app.manifest"
