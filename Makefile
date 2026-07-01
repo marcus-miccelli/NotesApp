@@ -4,7 +4,7 @@ WINDRES := windres
 # that includes it (without this, e.g. growing a struct in a shared header
 # silently mismatches sizeof across translation units).
 CFLAGS  := -std=c11 -Wall -Wextra -O2 -MMD -MP -Isrc -Ithird_party/md4c -Ithird_party/cjson
-LDLIBS  := -lgdi32 -lcomctl32 -lole32 -lshell32 -ldwmapi
+LDLIBS  := -lgdi32 -lcomctl32 -lole32 -lshell32 -ldwmapi -ld2d1 -ldwrite
 
 # Build-temp fix: cc1/collect2 need a writable temp dir, obtained via the
 # Windows GetTempPath env vars (TMP/TEMP). GNU Make scrubs these from recipe
@@ -16,7 +16,7 @@ export TEMP := $(BUILD_TMP)
 $(shell mkdir -p $(BUILD_TMP))
 
 # GUI app sources (added to as tasks land)
-APP_SRC := src/main.c src/note_window.c src/tray.c
+APP_SRC := src/main.c src/note_window.c src/tray.c src/gfx_d2d.c
 APP_OBJ := $(APP_SRC:.c=.o)
 RES_OBJ := assets/app_res.o   # compiled .rc (app icon)
 
