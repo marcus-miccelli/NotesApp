@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "test.h"
@@ -5,6 +6,9 @@
 #include "store.h"
 
 void test_app(void) {
+    /* Remove any leftover prefs from a prior run so count starts at 0. */
+    remove("C:\\tmp\\sntest_app\\quickNote\\preferences.json");
+
     AppState a;
     CHECK(app_init(&a, "C:\\tmp\\sntest_app"));
     CHECK(a.prefs.count == 0);

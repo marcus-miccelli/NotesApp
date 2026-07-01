@@ -904,6 +904,8 @@ static void nw_sync_winmeta(NoteWin* nw) {
  * the active tab. */
 static void nw_activate(NoteWin* nw, HWND hwnd, int i) {
     if (i < 0 || i >= nw->ntabs || i == nw->active) return;
+    nw_save_tab(nw, nw->active);
+    KillTimer(hwnd, IDT_DEBOUNCE);
     ShowWindow(nw->tab[nw->active].edit, SW_HIDE);
     nw->active = i;
     ShowWindow(nw->tab[i].edit, SW_SHOW);
@@ -964,12 +966,15 @@ static void nw_add_tab(NoteWin* nw, HWND hwnd) {
     SendMessageW(nw->tab[i].edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
     nw_load_tab(nw, i);
     nw_layout(hwnd, nw);
+    nw_save_tab(nw, nw->active);
+    KillTimer(hwnd, IDT_DEBOUNCE);
     ShowWindow(nw->tab[nw->active].edit, SW_HIDE);
     nw->active = i;
     ShowWindow(nw->tab[i].edit, SW_SHOW);
     nw_sync_winmeta(nw);
     InvalidateRect(hwnd, NULL, TRUE);
     SetFocus(nw->tab[i].edit);
+    nw_update_toggles(nw);
 }
 
 /* Delete the active note (with confirmation), removing its .md and index entry.
@@ -1000,7 +1005,7 @@ static LRESULT CALLBACK nw_rename_sub(HWND h, UINT msg, WPARAM wp, LPARAM lp,
     HWND parent = GetParent(h);
     if (msg == WM_KEYDOWN && wp == VK_RETURN) { nw_commit_rename(nw, parent, 1); return 0; }
     if (msg == WM_KEYDOWN && wp == VK_ESCAPE) { nw_commit_rename(nw, parent, 0); return 0; }
-    if (msg == WM_KILLFOCUS) { if (nw->rename_edit) nw_commit_rename(nw, parent, 1); }
+    if (msg == WM_KILLFOCUS) { if (nw->rename_edit) { nw_commit_rename(nw, parent, 1); return 0; } }
     return DefSubclassProc(h, msg, wp, lp);
 }
 
@@ -1036,8 +1041,8 @@ static void nw_commit_rename(NoteWin* nw, HWND hwnd, int accept) {
             if (m) { snprintf(m->name, sizeof m->name, "%s", s); nw_save_tab(nw, nw->rename_tab); }
         }
     }
-    if (nw->rename_font) { DeleteObject(nw->rename_font); nw->rename_font = NULL; }
     DestroyWindow(e);
+    if (nw->rename_font) { DeleteObject(nw->rename_font); nw->rename_font = NULL; }
     InvalidateRect(hwnd, NULL, TRUE);
     if (nw_edit(nw)) SetFocus(nw_edit(nw));
 }
@@ -1147,6 +1152,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         nw->ntabs = w ? w->ntabs : 0;
         if (nw->ntabs > WIN_MAX_TABS) nw->ntabs = WIN_MAX_TABS;
         nw->active = (w && w->active < nw->ntabs) ? w->active : 0;
+        if (nw->active < 0) nw->active = 0;
         for (int i = 0; i < nw->ntabs; i++) {
             snprintf(nw->tab[i].id, sizeof nw->tab[i].id, "%s", w->tabs[i]);
             nw->tab[i].edit = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
@@ -1364,6 +1370,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
         nw_registry_remove(hwnd);
         if (nw) {
+            if (nw->rename_font) { DeleteObject(nw->rename_font); nw->rename_font = NULL; }
             free(nw);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         }
@@ -1422,20 +1429,34 @@ void note_window_close(HWND hwnd) {
     DestroyWindow(hwnd);
 }
 
+/* Force-save every open window's geometry + all tab bodies (used on Quit, when
+ * windows aren't individually closed so their pending edits would otherwise be
+ * lost). Mirrors runtime state into the persisted WinMeta for each. */
+void note_window_save_all(void) {
+    for (int r = 0; r < NW_REGISTRY_CAP; r++) {
+        HWND hwnd = s_registry[r].hwnd;
+        if (!hwnd) continue;
+        NoteWin* nw = nw_get(hwnd);
+        if (!nw) continue;
+        WinMeta* w = nw_win(nw);
+        if (w) {
+            nw_save_geometry(hwnd, w);
+            for (int i = 0; i < nw->ntabs; i++) nw_save_tab(nw, i);
+            w->active = nw->active;
+            nw_sync_winmeta(nw);
+        }
+    }
+}
+
 void note_window_activate_note(HWND hwnd, const char* note_id) {
     NoteWin* nw = nw_get(hwnd);
     if (!nw) return;
     for (int t = 0; t < nw->ntabs; t++) {
         if (strcmp(nw->tab[t].id, note_id) == 0) {
-            if (t != nw->active) {
-                ShowWindow(nw->tab[nw->active].edit, SW_HIDE);
-                nw->active = t;
-                ShowWindow(nw->tab[t].edit, SW_SHOW);
-                InvalidateRect(hwnd, NULL, TRUE);
-            }
-            break;
+            nw_activate(nw, hwnd, t);   /* handles hide/show/sync/toggles/focus (no-op if already active) */
+            SetForegroundWindow(hwnd);
+            if (nw_edit(nw)) SetFocus(nw_edit(nw));
+            return;
         }
     }
-    SetForegroundWindow(hwnd);
-    if (nw_edit(nw)) SetFocus(nw_edit(nw));
 }

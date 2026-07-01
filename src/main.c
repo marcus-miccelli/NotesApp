@@ -41,6 +41,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show) {
         DispatchMessageW(&msg);
     }
 
+    note_window_save_all();   /* flush every open window's geometry + tab bodies */
     tray_shutdown();
     app_shutdown(&app);   /* saves preferences.json */
     return 0;
