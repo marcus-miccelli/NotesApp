@@ -5,6 +5,7 @@
 #include "store.h"
 #include "markdown.h"
 #include "resource.h"
+#include "gfx_d2d.h"
 #include <richedit.h>
 #include <windowsx.h>
 #include <commctrl.h>
@@ -113,6 +114,7 @@ typedef struct {
     HWND  rename_edit;  /* NULL when no rename in progress */
     HFONT rename_font;  /* font for the rename edit; freed on commit */
     int   rename_tab;   /* index of the tab being renamed */
+    GfxD2D* gfx;        /* Direct2D chrome renderer; lazy-created in WM_PAINT */
 } NoteWin;
 
 static HMODULE g_richedit = NULL;
@@ -1171,151 +1173,78 @@ static LRESULT nw_handle_key(NoteWin* nw, HWND hwnd, const MSGFILTER* mf) {
     return 0;
 }
 
-/* Fill a rounded rectangle (all corners) — used for the ✕ / + hover squares. */
-static void nw_fill_round(HDC hdc, const RECT* rc, int radius, COLORREF col) {
-    HBRUSH b = CreateSolidBrush(col);
-    HRGN rgn = CreateRoundRectRgn(rc->left, rc->top, rc->right + 1, rc->bottom + 1,
-                                  radius * 2, radius * 2);
-    FillRgn(hdc, rgn, b);
-    DeleteObject(rgn); DeleteObject(b);
-}
+/* Draw the tab strip with Direct2D: + button fill behind, tab fills back-to-
+ * front (top corners rounded, antialiased), then labels, ✕ glyphs, and the +
+ * glyph. Colors come from the existing palette. */
+static void nw_paint_tabs(NoteWin* nw, HWND hwnd) {
+    GfxD2D* g = nw->gfx;
+    int radius = nw_s(hwnd, TAB_RADIUS);
 
-/* Fill a tab shape: only the top-RIGHT corner is rounded; the top-left and the
- * bottom are square. This keeps each tab's left edge flush — the first tab sits
- * flush to the vertical divider, and a succeeding tab's square top-left butts
- * against (protrudes past) the previous tab's rounded top-right rather than
- * curving inward. Built from the rounded-top region with the top-left notch
- * squared back in. */
-static void nw_fill_round_top(HDC hdc, const RECT* rc, int radius, COLORREF col) {
-    HBRUSH b = CreateSolidBrush(col);
-    HRGN round = CreateRoundRectRgn(rc->left, rc->top, rc->right + 1,
-                                    rc->bottom + radius * 2, radius * 2, radius * 2);
-    HRGN clip  = CreateRectRgn(rc->left, rc->top, rc->right + 1, rc->bottom + 1);
-    CombineRgn(round, round, clip, RGN_AND);                 /* rounded top-left + top-right */
-    HRGN tl = CreateRectRgn(rc->left, rc->top, rc->left + radius + 1, rc->top + radius + 1);
-    CombineRgn(round, round, tl, RGN_OR);                    /* square the top-left back off */
-    FillRgn(hdc, round, b);
-    DeleteObject(round); DeleteObject(clip); DeleteObject(tl); DeleteObject(b);
-}
+    RECT pr; nw_plus_rect(nw, hwnd, &pr);
+    if (nw->hot_plus) gfx_fill_tab(g, pr, radius, COL_HOVER);
 
-/* Draw the Windows-Terminal-style tab strip: tabs nested in the bar (a gap
- * above so they don't span it) with rounded top corners; the active tab fills
- * lighter and connects into the body; hovered tabs get a subtler fill. The ✕
- * (per tab, on active/hover) and the + share a uniform square. */
-static void nw_paint_tabs(NoteWin* nw, HWND hwnd, HDC hdc) {
-    HFONT lf = CreateFontW(-14, 0,0,0, FW_SEMIBOLD, 0,0,0,0,0,0,0,0, L"Segoe UI");
-    HFONT gf = CreateFontW(-11, 0,0,0, FW_NORMAL,   0,0,0,0,0,0,0,0, L"Segoe UI");
-    HFONT pf = CreateFontW(-15, 0,0,0, FW_NORMAL,   0,0,0,0,0,0,0,0, L"Segoe UI");
-    HFONT old = (HFONT)SelectObject(hdc, lf);
-
-    SetBkMode(hdc, TRANSPARENT);
-
-    const int plus_overlap = TAB_RADIUS;
-
-    /* Paint the + button fill first, behind the tabs. Its left overlap tucks
-     * underneath the final tab, so the visible part behaves like a square. */
-    RECT pr;
-    nw_plus_rect(nw, hwnd, &pr);
-
-    if (nw->hot_plus) {
-        nw_fill_round_top(hdc, &pr, TAB_RADIUS, COL_HOVER);
-    }
-
-    /* Paint every tab fill back-to-front. Inactive tabs still need a real
-     * shape so neighbour rounded-corner notches are filled consistently. */
     for (int i = nw->ntabs - 1; i >= 0; i--) {
-        RECT r;
-        nw_tab_rect(nw, hwnd, i, &r);
-
+        RECT r; nw_tab_rect(nw, hwnd, i, &r);
         int isact = (i == nw->active);
         int ishot = (i == nw->hot_tab);
 
         int fill_left = r.left;
-        if (i > 0) fill_left -= TAB_RADIUS;
+        if (i > 0) fill_left -= radius;
+        RECT shape = { fill_left, r.top + nw_s(hwnd, TAB_TOP_GAP), r.right, r.bottom - 1 };
 
-        RECT shape = {
-            fill_left,
-            r.top + TAB_TOP_GAP,
-            r.right,
-            r.bottom - 1
-        };
-
-        COLORREF fill = COL_BG;
+        unsigned fill = COL_BG;
         if (isact)      fill = COL_TAB_ACT;
         else if (ishot) fill = COL_TAB_HOT;
-
-        nw_fill_round_top(hdc, &shape, TAB_RADIUS, fill);
+        gfx_fill_tab(g, shape, radius, fill);
     }
 
-    /* Paint labels and close buttons after fills so overlap never covers text. */
     for (int i = 0; i < nw->ntabs; i++) {
-        RECT r;
-        nw_tab_rect(nw, hwnd, i, &r);
-
+        RECT r; nw_tab_rect(nw, hwnd, i, &r);
         int isact = (i == nw->active);
         int ishot = (i == nw->hot_tab);
 
         NoteMeta* m = nw_note_meta(nw, i);
         wchar_t wname[128];
-        MultiByteToWideChar(CP_ACP, 0,
-            m && m->name[0] ? m->name : "Untitled",
-            -1, wname, 128);
+        MultiByteToWideChar(CP_ACP, 0, m && m->name[0] ? m->name : "Untitled", -1, wname, 128);
 
-        RECT tr = {
-            r.left + 12,
-            r.top + TAB_TOP_GAP,
-            r.right - TAB_CLOSE_W - 4,
-            r.bottom - 1
-        };
+        RECT tr = { r.left + nw_s(hwnd, 12), r.top + nw_s(hwnd, TAB_TOP_GAP),
+                    r.right - nw_s(hwnd, TAB_CLOSE_W) - nw_s(hwnd, 4), r.bottom - 1 };
+        unsigned lc = isact ? COL_TEXT
+                    : (ishot ? RGB(0xc9,0xc9,0xd0) : RGB(0x8a,0x8a,0x90));
+        gfx_text(g, wname, tr, GFX_FMT_LABEL, lc);
 
-        SelectObject(hdc, lf);
-        SetTextColor(hdc,
-            isact ? COL_TEXT :
-            (ishot ? RGB(0xc9,0xc9,0xd0) : RGB(0x8a,0x8a,0x90)));
-        DrawTextW(hdc, wname, -1, &tr,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-        RECT xr;
-        nw_close_rect(nw, hwnd, i, &xr);
-
+        RECT xr; nw_close_rect(nw, hwnd, i, &xr);
         int overx = (ishot && nw->hot_close);
-        if (overx) {
-           nw_fill_round_top(hdc, &xr, TAB_RADIUS, RGB(0x3a,0x3a,0x40));
-        }
-
-        SelectObject(hdc, gf);
-        SetTextColor(hdc, overx ? RGB(0xff,0xff,0xff) : RGB(0xc0,0xc0,0xc8));
-        DrawTextW(hdc, L"\x2715", -1, &xr,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        if (overx) gfx_fill_tab(g, xr, radius, RGB(0x3a,0x3a,0x40));
+        gfx_text(g, L"\x2715", xr, GFX_FMT_CLOSE, overx ? RGB(0xff,0xff,0xff) : RGB(0xc0,0xc0,0xc8));
     }
 
-    /* Draw only inside the visible square part of the + button. */
-    RECT pg = pr;
-    pg.left += plus_overlap;
-
-    SelectObject(hdc, pf);
-    SetTextColor(hdc, nw->hot_plus ? RGB(0xff,0xff,0xff) : RGB(0x9a,0x9a,0xa2));
-    DrawTextW(hdc, L"\x002B", -1, &pg,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    RECT pg = pr; pg.left += radius;
+    gfx_text(g, L"\x002B", pg, GFX_FMT_PLUS, nw->hot_plus ? RGB(0xff,0xff,0xff) : RGB(0x9a,0x9a,0xa2));
 
     if (nw->rename_edit) {
-        RECT er;
-        nw_rename_rect(nw, hwnd, &er);
-
-        RECT fr = {
-            er.left - 2,
-            er.top - 2,
-            er.right + 2,
-            er.bottom + 2
-        };
-
-        nw_fill_round(hdc, &fr, 5, COL_ACCENT);
+        RECT er; nw_rename_rect(nw, hwnd, &er);
+        RECT fr = { er.left - 2, er.top - 2, er.right + 2, er.bottom + 2 };
+        gfx_fill_round(g, fr, nw_s(hwnd, 5), COL_ACCENT);
     }
+}
 
-    SelectObject(hdc, old);
-    DeleteObject(lf);
-    DeleteObject(gf);
-    DeleteObject(pf);
+/* Full chrome paint (inside gfx_begin/gfx_end): dividers, the qN wordmark in
+ * the top-left cell, and the tab strip. Window min/max/close buttons are still
+ * child controls in this task (painted by WM_DRAWITEM). */
+static void nw_paint_chrome(NoteWin* nw, HWND hwnd) {
+    RECT rc; GetClientRect(hwnd, &rc);
+    int vx, hy; nw_regions(hwnd, NULL, NULL, &vx, &hy);
+
+    RECT vline = { vx, 0, vx + 1, rc.bottom };
+    RECT hline = { 0, hy, rc.right, hy + 1 };
+    gfx_fill_rect(nw->gfx, vline, COL_BORDER);
+    gfx_fill_rect(nw->gfx, hline, COL_BORDER);
+
+    RECT mark = { 0, 0, vx, hy };
+    gfx_text(nw->gfx, L"qN", mark, GFX_FMT_MARK, COL_TEXT);
+
+    nw_paint_tabs(nw, hwnd);
 }
 
 static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1392,28 +1321,28 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_SIZE:
         if (nw) {
+            if (nw->gfx) {
+                RECT rc; GetClientRect(hwnd, &rc);
+                gfx_resize(nw->gfx, rc.right - rc.left, rc.bottom - rc.top);
+            }
             nw_layout(hwnd, nw);
             InvalidateRect(hwnd, NULL, TRUE);
-            if (nw->wbtns[1]) InvalidateRect(nw->wbtns[1], NULL, TRUE);   /* max<->restore glyph */
+            if (nw->wbtns[1]) InvalidateRect(nw->wbtns[1], NULL, TRUE);
         }
         return 0;
     case WM_PAINT: {
-        PAINTSTRUCT ps; HDC hdc = BeginPaint(hwnd, &ps);
-        RECT rc; GetClientRect(hwnd, &rc);
-        int vx, hy; nw_regions(hwnd, NULL, NULL, &vx, &hy);
-        /* qN icon centered in the top-left cell */
-        if (g_app_icon) {
-            int side = (vx < hy ? vx : hy) - 12; if (side < 8) side = 8;
-            int ix = (vx - side) / 2, iy = (hy - side) / 2;
-            DrawIconEx(hdc, ix, iy, g_app_icon, side, side, 0, NULL, DI_NORMAL);
+        PAINTSTRUCT ps; BeginPaint(hwnd, &ps);
+        if (nw) {
+            if (!nw->gfx) nw->gfx = gfx_create(hwnd, nw_dpi(hwnd));
+            if (nw->gfx && gfx_begin(nw->gfx, COL_BG)) {
+                nw_paint_chrome(nw, hwnd);
+                if (gfx_end(nw->gfx)) {          /* target lost: rebuild next paint */
+                    gfx_destroy(nw->gfx);
+                    nw->gfx = NULL;
+                    InvalidateRect(hwnd, NULL, FALSE);
+                }
+            }
         }
-        RECT vline = { vx, 0, vx + 1, rc.bottom };          /* sidebar | content */
-        RECT hline = { 0, hy, rc.right, hy + 1 };           /* full-width divider */
-        FillRect(hdc, &vline, g_border_brush);
-        FillRect(hdc, &hline, g_border_brush);
-
-        /* Tab strip: all tabs + ✕ glyphs + the + button (Task 6). */
-        if (nw) nw_paint_tabs(nw, hwnd, hdc);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -1650,6 +1579,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
         nw_registry_remove(hwnd);
         if (nw) {
+            if (nw->gfx) { gfx_destroy(nw->gfx); nw->gfx = NULL; }
             if (nw->rename_font) { DeleteObject(nw->rename_font); nw->rename_font = NULL; }
             free(nw);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -1663,6 +1593,7 @@ void note_window_register_class(HINSTANCE hInst) {
     if (!g_richedit) g_richedit = LoadLibraryW(L"Msftedit.dll");
     if (!g_bg_brush) g_bg_brush = CreateSolidBrush(COL_BG);
     if (!g_border_brush) g_border_brush = CreateSolidBrush(COL_BORDER);
+    gfx_global_init();
     WNDCLASSEXW wc; memset(&wc, 0, sizeof wc);
     wc.cbSize = sizeof wc;
     wc.lpfnWndProc = nw_proc;
