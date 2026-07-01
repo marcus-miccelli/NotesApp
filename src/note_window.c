@@ -259,7 +259,7 @@ static void nw_draw_button(NoteWin* nw, const DRAWITEMSTRUCT* d) {
     int idx = (int)d->CtlID - IDB_BOLD;
     int on = (d->itemState & ODS_SELECTED) != 0 ||
              (idx >= 0 && idx < NUM_BTNS && nw->active_fmt[idx]);
-    HBRUSH bg = CreateSolidBrush(on ? COL_TOGGLE : COL_BG);
+    HBRUSH bg = CreateSolidBrush(on ? COL_TAB_ACT : COL_BG);   /* match the active-tab fill */
     FillRect(d->hDC, &d->rcItem, bg);
     DeleteObject(bg);
 
@@ -1116,17 +1116,22 @@ static void nw_fill_round(HDC hdc, const RECT* rc, int radius, COLORREF col) {
     DeleteObject(rgn); DeleteObject(b);
 }
 
-/* Fill a shape with rounded TOP corners and a flat bottom (a WT tab). Built by
- * AND-ing a tall round-rect (so only its top corners fall inside) with a rect
- * clipped to the tab's bottom. */
+/* Fill a tab shape: only the top-RIGHT corner is rounded; the top-left and the
+ * bottom are square. This keeps each tab's left edge flush — the first tab sits
+ * flush to the vertical divider, and a succeeding tab's square top-left butts
+ * against (protrudes past) the previous tab's rounded top-right rather than
+ * curving inward. Built from the rounded-top region with the top-left notch
+ * squared back in. */
 static void nw_fill_round_top(HDC hdc, const RECT* rc, int radius, COLORREF col) {
     HBRUSH b = CreateSolidBrush(col);
     HRGN round = CreateRoundRectRgn(rc->left, rc->top, rc->right + 1,
                                     rc->bottom + radius * 2, radius * 2, radius * 2);
     HRGN clip  = CreateRectRgn(rc->left, rc->top, rc->right + 1, rc->bottom + 1);
-    CombineRgn(round, round, clip, RGN_AND);
+    CombineRgn(round, round, clip, RGN_AND);                 /* rounded top-left + top-right */
+    HRGN tl = CreateRectRgn(rc->left, rc->top, rc->left + radius + 1, rc->top + radius + 1);
+    CombineRgn(round, round, tl, RGN_OR);                    /* square the top-left back off */
     FillRgn(hdc, round, b);
-    DeleteObject(round); DeleteObject(clip); DeleteObject(b);
+    DeleteObject(round); DeleteObject(clip); DeleteObject(tl); DeleteObject(b);
 }
 
 /* Draw the Windows-Terminal-style tab strip: tabs nested in the bar (a gap
@@ -1135,7 +1140,8 @@ static void nw_fill_round_top(HDC hdc, const RECT* rc, int radius, COLORREF col)
  * (per tab, on active/hover) and the + share a uniform square. */
 static void nw_paint_tabs(NoteWin* nw, HWND hwnd, HDC hdc) {
     HFONT lf = CreateFontW(-14, 0,0,0, FW_SEMIBOLD, 0,0,0,0,0,0,0,0, L"Segoe UI");
-    HFONT gf = CreateFontW(-11, 0,0,0, FW_NORMAL,   0,0,0,0,0,0,0,0, L"Segoe UI"); /* glyphs */
+    HFONT gf = CreateFontW(-11, 0,0,0, FW_NORMAL,   0,0,0,0,0,0,0,0, L"Segoe UI"); /* ✕ glyph */
+    HFONT pf = CreateFontW(-15, 0,0,0, FW_NORMAL,   0,0,0,0,0,0,0,0, L"Segoe UI"); /* + glyph (matches ✕ size) */
     HFONT old = (HFONT)SelectObject(hdc, lf);
     SetBkMode(hdc, TRANSPARENT);
 
@@ -1167,7 +1173,7 @@ static void nw_paint_tabs(NoteWin* nw, HWND hwnd, HDC hdc) {
 
     RECT pr; nw_plus_rect(nw, hwnd, &pr);             /* + (same square as ✕) */
     if (nw->hot_plus) nw_fill_round(hdc, &pr, 4, COL_HOVER);
-    SelectObject(hdc, gf);
+    SelectObject(hdc, pf);
     SetTextColor(hdc, nw->hot_plus ? RGB(0xff,0xff,0xff) : RGB(0x9a,0x9a,0xa2));
     DrawTextW(hdc, L"\x002B", -1, &pr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
@@ -1178,7 +1184,7 @@ static void nw_paint_tabs(NoteWin* nw, HWND hwnd, HDC hdc) {
     }
 
     SelectObject(hdc, old);
-    DeleteObject(lf); DeleteObject(gf);
+    DeleteObject(lf); DeleteObject(gf); DeleteObject(pf);
 }
 
 static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
