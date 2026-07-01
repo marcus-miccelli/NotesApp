@@ -15,6 +15,7 @@
 static HWND s_owner = NULL;
 static AppState* s_app = NULL;
 static NOTIFYICONDATAW s_nid;
+static UINT s_newwin_msg = 0;   /* registered "open a new window" message (single-instance) */
 
 static void tray_show_menu(HWND hwnd) {
     POINT pt; GetCursorPos(&pt);
@@ -37,6 +38,13 @@ static void tray_show_menu(HWND hwnd) {
 }
 
 static LRESULT CALLBACK owner_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    /* A second launch posts this (registered) message so we open a new window
+     * in this existing process instead of starting a duplicate instance. */
+    if (msg == s_newwin_msg && s_newwin_msg != 0) {
+        WinMeta* w = app_new_window(s_app);
+        if (w) { note_window_place_cascade(s_app, w); note_window_open(s_app, w); }
+        return 0;
+    }
     switch (msg) {
     case WM_TRAY:
         if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_LBUTTONUP)
@@ -46,7 +54,7 @@ static LRESULT CALLBACK owner_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         UINT id = LOWORD(wp);
         if (id == IDM_NEW) {
             WinMeta* w = app_new_window(s_app);
-            if (w) note_window_open(s_app, w);
+            if (w) { note_window_place_cascade(s_app, w); note_window_open(s_app, w); }
         } else if (id == IDM_QUIT) {
             PostQuitMessage(0);
         } else if (id >= IDM_NOTE0) {
@@ -59,7 +67,7 @@ static LRESULT CALLBACK owner_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     note_window_activate_note(existing, nid);
                 } else {
                     WinMeta* w = app_open_note_in_window(s_app, nid);
-                    if (w) note_window_open(s_app, w);
+                    if (w) { note_window_place_cascade(s_app, w); note_window_open(s_app, w); }
                 }
             }
         }
@@ -71,11 +79,12 @@ static LRESULT CALLBACK owner_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 
 bool tray_init(AppState* app, HINSTANCE hInst) {
     s_app = app;
+    s_newwin_msg = RegisterWindowMessageW(TRAY_NEWWIN_MSG);
     WNDCLASSEXW wc; memset(&wc, 0, sizeof wc);
     wc.cbSize = sizeof wc; wc.lpfnWndProc = owner_proc;
-    wc.hInstance = hInst; wc.lpszClassName = L"StickyNotesOwner";
+    wc.hInstance = hInst; wc.lpszClassName = TRAY_OWNER_CLASS;
     RegisterClassExW(&wc);
-    s_owner = CreateWindowExW(0, L"StickyNotesOwner", L"", 0,
+    s_owner = CreateWindowExW(0, TRAY_OWNER_CLASS, L"", 0,
         0, 0, 0, 0, HWND_MESSAGE, NULL, hInst, NULL);
     if (!s_owner) return false;
 

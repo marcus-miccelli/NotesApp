@@ -11,6 +11,7 @@ typedef struct {
 } AppState;
 
 bool      app_init(AppState* a, const char* root_override);
+void      app_persist(AppState* a);   /* save prefs now (session-restore) */
 void      app_shutdown(AppState* a);
 void      app_gen_id(char* out16);
 NoteMeta* app_new_note(AppState* a);

@@ -898,6 +898,7 @@ static void nw_sync_winmeta(NoteWin* nw) {
     w->ntabs = nw->ntabs; w->active = nw->active;
     for (int i = 0; i < nw->ntabs; i++)
         snprintf(w->tabs[i], sizeof w->tabs[i], "%s", nw->tab[i].id);
+    app_persist(nw->app);   /* session changed (add/close/reorder/activate) — save now */
 }
 
 /* Show tab i, hide the previous active one. No-op if i is invalid or already
@@ -925,6 +926,7 @@ static void nw_remove_tab(NoteWin* nw, HWND hwnd, int i) {
     if (nw->ntabs == 0) {
         WinMeta* w = nw_win(nw);
         if (w) prefs_remove_window(&nw->app->prefs, w->id);
+        app_persist(nw->app);   /* window gone — persist before it's destroyed */
         DestroyWindow(hwnd);
         return;   /* WM_DESTROY frees nw — do NOT touch nw after this */
     }
@@ -1038,7 +1040,7 @@ static void nw_commit_rename(NoteWin* nw, HWND hwnd, int accept) {
         size_t n = strlen(s); while (n > 0 && s[n-1] == ' ') s[--n] = '\0';
         if (s[0]) {
             NoteMeta* m = prefs_find(&nw->app->prefs, nw->tab[nw->rename_tab].id);
-            if (m) { snprintf(m->name, sizeof m->name, "%s", s); nw_save_tab(nw, nw->rename_tab); }
+            if (m) { snprintf(m->name, sizeof m->name, "%s", s); nw_save_tab(nw, nw->rename_tab); app_persist(nw->app); }
         }
     }
     DestroyWindow(e);
@@ -1323,6 +1325,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         WinMeta* w = nw_win(nw);
         if (!w) return 0;
         nw_save_geometry(hwnd, w);
+        app_persist(nw->app);   /* geometry moved — persist for session restore */
         return 0;
     }
     case WM_DRAWITEM:
@@ -1396,6 +1399,35 @@ void note_window_register_class(HINSTANCE hInst) {
     RegisterClassExW(&wc);
 }
 
+/* Offset a NEW window's position in a cascade, down-right from the window the
+ * user was on (the foreground note window, else the most recent open one),
+ * wrapping to the work-area top-left when it would run off screen. The step is
+ * the system caption height + frame — the classic Windows cascade offset
+ * (~30px). Restored windows keep their saved geometry and must NOT call this. */
+void note_window_place_cascade(AppState* app, WinMeta* w) {
+    (void)app;
+    if (!w) return;
+    int step = GetSystemMetrics(SM_CYCAPTION) + GetSystemMetrics(SM_CYSIZEFRAME)
+             + GetSystemMetrics(SM_CXPADDEDBORDER);
+    if (step < 8) step = 30;                       /* sane fallback */
+
+    HWND ref = NULL;                               /* the window to cascade from */
+    HWND fg = GetForegroundWindow();
+    wchar_t cls[32];
+    if (fg && GetClassNameW(fg, cls, 32) && wcscmp(cls, NOTE_CLASS) == 0) ref = fg;
+    if (!ref)
+        for (int i = NW_REGISTRY_CAP - 1; i >= 0; i--)
+            if (s_registry[i].hwnd) { ref = s_registry[i].hwnd; break; }
+
+    RECT wa; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    int bx = w->x, by = w->y;
+    if (ref) { RECT rr; GetWindowRect(ref, &rr); bx = rr.left + step; by = rr.top + step; }
+    if (bx + w->w > wa.right || by + w->h > wa.bottom) { bx = wa.left + step; by = wa.top + step; }
+    if (bx < wa.left) bx = wa.left + step;
+    if (by < wa.top)  by = wa.top + step;
+    w->x = bx; w->y = by;
+}
+
 HWND note_window_open(AppState* app, WinMeta* win) {
     NoteWin* nw = calloc(1, sizeof *nw);
     if (!nw) return NULL;
@@ -1408,7 +1440,7 @@ HWND note_window_open(AppState* app, WinMeta* win) {
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VISIBLE,
         win->x, win->y, win->w, win->h,
         NULL, NULL, GetModuleHandleW(NULL), nw);
-    if (h) nw_registry_add(nw->win_id, h);
+    if (h) { nw_registry_add(nw->win_id, h); app_persist(app); }
     else   free(nw);
     return h;
 }
@@ -1424,6 +1456,7 @@ void note_window_close(HWND hwnd) {
             /* Remove from prefs: the X-closed window should not reopen next launch.
              * The notes themselves remain in prefs.notes and on disk. */
             prefs_remove_window(&nw->app->prefs, w->id);
+            app_persist(nw->app);   /* window closed — persist for session restore */
         }
     }
     DestroyWindow(hwnd);
