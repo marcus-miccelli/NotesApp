@@ -1,7 +1,7 @@
 # Design: Windows-Terminal-style tabbed notes
 
 Date: 2026-06-29
-Status: approved
+Status: implemented
 
 ## Goal
 

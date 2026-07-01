@@ -1,7 +1,8 @@
 # quickNote
 
-Native Windows sticky-note app in C. Each note is a dark-mode window editing a
-Markdown `.md` file. Open notes and their positions are restored on launch.
+Native Windows sticky-note app in C. Each window holds multiple notes as tabs,
+editing Markdown `.md` files with live preview. Windows and tab order are
+restored on launch.
 
 ## Build
 
@@ -16,34 +17,56 @@ The app icon ("qN") is built from `assets/quicknote.ico` via `assets/app.rc`.
 ## Data
 
 Stored under `%APPDATA%\quickNote\`:
-- `notes\<id>.md` — one markdown file per note; the title is its leading
-  `# <title>` H1, the rest is the body
-- `preferences.json` — note name, open state, window geometry, color, theme
+- `notes\<id>.md` — one Markdown file per note; the leading `# <title>` H1 is
+  the note name, the rest is the body
+- `preferences.json` — schema v2: a `windows` array (geometry, ordered
+  tab note-ids, active index) and a `notes` array (name, id)
 
 ## Usage
 
-- Run `quicknote.exe`. A tray icon manages notes.
-- Each note is a dark native window with a standard title bar (minimize,
-  maximize, close); the **X** closes it (keeps the file).
-- A note has a **title box** (styled as Heading 1) above the body; new notes
-  are named `Untitled N`. Press Enter in the title to jump to the body.
-- **Ctrl+N**: new note. **Ctrl+Shift+D**: delete the note permanently (confirms first).
-- Tray menu shows note names (New Note, reopen a note, Quit).
-- Markdown is rendered live as you type (headings, **bold**, *italic*,
-  ~~strikethrough~~, `code`, bullet/numbered lists). Delimiters are hidden
-  (`**bold**` shows as bold) but kept in the file, so the `.md` stays plain
-  Markdown on disk.
-- A formatting **sidebar** (left edge) toggles styles on the selection:
+Run `quicknote.exe`. A tray icon appears in the notification area.
 
-  | Button | Action | Shortcut |
-  |--------|--------|----------|
-  | **B**  | Bold `**…**`       | Ctrl+B |
-  | *I*    | Italic `*…*`       | Ctrl+I |
-  | ~~S~~  | Strikethrough `~~…~~` | Ctrl+Shift+X |
-  | •      | Bullet list `- `   | Ctrl+Shift+8 |
-  | 1.     | Numbered list `N. `| Ctrl+Shift+7 |
+### Windows and tabs
 
-  Each button toggles: applying again on already-formatted text removes it.
+Each window holds one or more notes as **tabs** in a Windows-Terminal-style
+strip across the title bar:
+
+- **`+` / Ctrl+N** — add a new tab (new note) to the current window
+- **Alt+N** — open a new window (with one new note)
+- **Drag a tab** — reorder tabs within the window
+- **✕ (tab close button) / middle-click** — close a tab; the note stays on
+  disk. Closing the last tab closes the window.
+- **Ctrl+R** — rename the active tab/note (press Enter to confirm, Escape to
+  cancel)
+- **Ctrl+Shift+D** — delete the active note permanently (confirms first)
+- **Title-bar X** — close the window; all its notes stay on disk and reopen on
+  the next launch (unless the window was the last to close, in which case a
+  fresh window opens)
+
+### Tray
+
+The tray menu lists open note names. **New Note** opens a new window. Clicking
+a listed note focuses its window and activates that tab; if the window was
+closed, it reopens. **Quit** saves state and exits.
+
+### Markdown editing
+
+Markdown is rendered live as you type (headings, **bold**, *italic*,
+~~strikethrough~~, `code`, bullet/numbered lists). Delimiters are hidden
+(`**bold**` displays as just bold) but kept in the `.md` file, so note files
+stay plain Markdown on disk.
+
+A formatting **sidebar** (left edge) toggles styles on the selection:
+
+| Button | Action | Shortcut |
+|--------|--------|----------|
+| **B**  | Bold `**…**`       | Ctrl+B |
+| *I*    | Italic `*…*`       | Ctrl+I |
+| ~~S~~  | Strikethrough `~~…~~` | Ctrl+Shift+X |
+| •      | Bullet list `- `   | Ctrl+Shift+8 |
+| 1.     | Numbered list `N. `| Ctrl+Shift+7 |
+
+Each button toggles: applying again on already-formatted text removes it.
 
 ## Tech
 
