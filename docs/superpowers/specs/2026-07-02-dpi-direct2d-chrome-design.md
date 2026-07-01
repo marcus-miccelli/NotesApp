@@ -94,13 +94,25 @@ static int nw_s(HWND h, int v){ return MulDiv(v, nw_dpi(h), 96); }
 
 Sites to convert (all geometry already funnels through a small set of helpers):
 `nw_regions`, `nw_layout`, `nw_tab_w`, `nw_tab_rect`, `nw_close_rect`,
-`nw_plus_rect`, `nw_strip_left/right`, `nw_tab_hit`, `nw_rename_rect`; plus
-owner-draw button font `lfHeight` (`nw_draw_button`, `nw_draw_wbutton`) and the
-RichEdit `CHARFORMAT2W.yHeight` used at load/format time.
+`nw_plus_rect`, `nw_strip_left/right`, `nw_tab_hit`, `nw_rename_rect`, plus the
+new `nw_wbtn_rect` (§4); the sidebar button font `lfHeight` (`nw_draw_button`);
+and the RichEdit `CHARFORMAT2W.yHeight` used at load/format time. (Chrome text
+sizing moves to DirectWrite text formats, §4.)
 
-The Direct2D render target is pinned to **96 DPI (1 DIP = 1 physical pixel)** so
-paint coordinates and GDI hit-test coordinates share one pixel space — avoids
-dual-unit drift between painting and mouse hit-testing.
+**Explicit render-target DPI decision.** We deliberately work in *physical
+pixel* coordinates and prevent Direct2D from applying a second DPI scale. After
+creating the `ID2D1HwndRenderTarget` we call
+`ID2D1RenderTarget_SetDpi(rt, 96.0f, 96.0f)`, so 1 DIP = 1 physical pixel. All
+DPI scaling is done by us via `nw_s(...)`; Direct2D does none. This keeps paint
+coordinates and GDI mouse hit-test coordinates in one shared pixel space.
+
+> Do **not** "fix" this later by setting the render-target DPI to the monitor
+> DPI. That would make Direct2D scale on top of our already-`nw_s`-scaled values
+> and double-scale the entire chrome. The 96-DPI pin is intentional and load-
+> bearing.
+
+Because font sizes are baked as physical pixels (`nw_s(base)`), the DirectWrite
+text formats are window-DPI-specific — see §4.
 
 ### 3. WM_DPICHANGED (Per-Monitor live rescale)
 
@@ -109,9 +121,15 @@ New handler in `nw_proc`:
 1. `SetWindowPos` to the OS-suggested rect (`lParam` → `RECT*`, with
    `SWP_NOZORDER | SWP_NOACTIVATE`).
 2. `nw_layout(hwnd, nw)` — re-reads DPI via `nw_s`, repositions children.
-3. Reapply the body `CHARFORMAT2W` to each tab so RichEdit re-renders at the new
+3. Recreate the per-window DirectWrite text formats at the new scaled sizes
+   (chrome text — tab labels, ✕, +, min/max/close glyphs — is DPI-sized; see §4).
+   Because DirectWrite owns all chrome text, this is a single "release + recreate
+   the cached formats" step rather than chasing many `HFONT`s.
+4. Reapply the body `CHARFORMAT2W` to each tab so RichEdit re-renders at the new
    DPI, and re-run `nw_apply_format_edit` so heading `yHeight`s track the change.
-4. `InvalidateRect(hwnd, NULL, TRUE)`.
+5. The sidebar B/I/S buttons (still GDI owner-draw) create their `HFONT` per
+   `WM_DRAWITEM` from an `nw_s`-scaled `lfHeight`, so they self-correct on the
+   next repaint — no cached font to refresh. `InvalidateRect(hwnd, NULL, TRUE)`.
 
 The D2D target is pixel-based, so it only needs `Resize` (already handled in
 `WM_SIZE`, which fires as part of the `SetWindowPos`).
@@ -121,40 +139,65 @@ The D2D target is pixel-based, so it only needs `Resize` (already handled in
 New module isolates all COM boilerplate behind a handle-based interface, keeping
 `note_window.c` focused. `INITGUID` is defined at the top of `gfx_d2d.c`.
 
+**Direct2D owns the entire titlebar/chrome**: titlebar background, dividers,
+tabs, the + button, per-tab close ✕, and the window min/max/close buttons. The
+sidebar B/I/S buttons and the RichEdit bodies remain child controls (self-
+painting) — they are not chrome and stay as-is.
+
 **Process-wide resources** (created in `note_window_register_class`, released at
-shutdown): `ID2D1Factory`, `IDWriteFactory`, and cached `IDWriteTextFormat`s for
-the tab label (Segoe UI SemiBold), the ✕ glyph, and the + glyph. Text formats
-are factory-owned and DPI-independent, so they are shared across windows.
+shutdown): `ID2D1Factory`, `IDWriteFactory`.
 
 **Per-window resources**: `ID2D1HwndRenderTarget` bound to the hwnd, created
-lazily on first paint, `ID2D1HwndRenderTarget_Resize` on `WM_SIZE`, released on
-`WM_DESTROY`. Solid-color brushes for the palette are created from the target
-and cached alongside it (target-owned resources).
+lazily on first paint, `ID2D1RenderTarget_SetDpi(rt, 96, 96)` immediately after
+creation (see §2), `ID2D1HwndRenderTarget_Resize` on `WM_SIZE`, released on
+`WM_DESTROY`. Cached alongside the target: solid-color palette brushes, and the
+`IDWriteTextFormat`s (tab label Segoe UI SemiBold, the ✕ / + glyphs, and the
+Segoe MDL2 Assets min/max/close glyphs, plus the "qN" wordmark). Text-format
+font sizes are `nw_s`-scaled physical pixels, so they are **per-window and
+recreated on `WM_DPICHANGED`** (§3), not shared process-wide.
 
-**Paint** (`WM_PAINT` → rewritten `nw_paint_tabs`):
+**Paint** (`WM_PAINT` → rewritten `nw_paint_tabs`, all in one `BeginDraw` pass):
 
 1. `BeginDraw`.
-2. `Clear` to `COL_BG`.
+2. `Clear` to `COL_BG` (titlebar background).
 3. Dividers via `FillRectangle`.
-4. qN icon via GDI interop: `ID2D1GdiInteropRenderTarget_GetDC` → `DrawIconEx`
-   → `ReleaseDC` (avoids HICON→bitmap conversion).
+4. "qN" wordmark in the top-left cell via DirectWrite `DrawText` (replaces the
+   GDI icon interop — the mark is tiny and interop is not worth its complexity).
 5. Tab fills: per-tab `ID2D1PathGeometry` with the top-left and top-right
    corners rounded via arc segments and square bottom (mirrors the current
    top-only-rounded shape, but antialiased). Built per tab per paint — a handful
    of tabs, negligible cost.
 6. Hover squares (✕ / +) via `FillRoundedRectangle`.
-7. Labels and ✕ / + glyphs via DirectWrite `DrawText`, with the label format
+7. Window min/max/close buttons: hover/pressed fills via `FillRectangle` (close
+   → red on hover) then the Segoe MDL2 Assets glyphs via DirectWrite.
+8. Labels and ✕ / + glyphs via DirectWrite `DrawText`, with the label format
    set to trim with an ellipsis sign to match the old `DT_END_ELLIPSIS`.
-8. `EndDraw`; if it returns `D2DERR_RECREATE_TARGET`, release per-window
+9. `EndDraw`; if it returns `D2DERR_RECREATE_TARGET`, release per-window
    resources and `InvalidateRect` to rebuild on the next paint.
 
 `ID2D1HwndRenderTarget` presents atomically → flicker-free during resize/hover,
 satisfying the double-buffering goal with no separate memory DC.
 
-**Deliberately out of scope**: the owner-drawn child buttons (sidebar B/I/S and
-window min/max/close) stay GDI — they are flat rectangles with no rounded
-corners, so they need no AA. They still receive DPI-scaled fonts per §2.
-Converting them to D2D would be scope creep.
+**Migrating min/max/close off child controls.** They are currently owner-draw
+child `BUTTON` HWNDs (`nw->wbtns[]`) with a hover subclass (`nw_wbtn_sub`),
+drawn in `WM_DRAWITEM` (`nw_draw_wbutton`) and actioned in `WM_COMMAND`. Moving
+them into the D2D chrome pass removes all of that:
+
+- Delete `wbtns[]` creation, the subclass, the `WM_DRAWITEM` window-button
+  branch, and their `nw_layout` positioning.
+- Add hit rects (an `nw_wbtn_rect(hwnd, i, *r)` helper, right-aligned like the
+  old layout) and draw them in `nw_paint_tabs`.
+- Hover: reuse the existing `whot[]` state, now updated from the parent's
+  `WM_MOUSEMOVE` / `WM_MOUSELEAVE` hit-test (same pattern already used for tab
+  hover) instead of the per-control subclass.
+- Clicks: hit-test in `WM_LBUTTONDOWN`; min → `SW_MINIMIZE`, max → toggle
+  `SW_MAXIMIZE`/`SW_RESTORE`, close → `WM_CLOSE`. `WM_NCHITTEST` already returns
+  `HTCLIENT` for this region (the `pt.x >= btns_l` branch), so clicks reach the
+  window proc — keep it.
+
+**Deliberately out of scope**: the sidebar B/I/S / bullet / number buttons stay
+GDI owner-draw child controls — they are not titlebar chrome, are flat
+rectangles needing no AA, and already get DPI-scaled fonts per §2/§3.
 
 ### 5. Build
 
@@ -186,4 +229,11 @@ Converting them to D2D would be scope creep.
   renders correctly.
 - `WM_DPICHANGED` + RichEdit font scaling is the fiddliest area; the body font
   size must track DPI so headings don't look wrong after a monitor change.
-- Icon GDI-interop DC must be released before `EndDraw`, or the draw fails.
+- Migrating min/max/close from child controls to D2D-drawn regions: hover state
+  now comes from parent `WM_MOUSEMOVE` hit-testing rather than a per-control
+  subclass — verify hover/press feel matches the old buttons and that clicks
+  still land (the `WM_NCHITTEST` `HTCLIENT` region must cover the new hit rects).
+- Drawing "qN" as DirectWrite text sidesteps GDI icon interop. If interop is ever
+  reintroduced (e.g. to draw the real icon), the render target must be created
+  with `D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE` and the interop DC released
+  before `EndDraw`, or the draw fails.
