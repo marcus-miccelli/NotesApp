@@ -48,7 +48,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show) {
         if (msg.message == WM_SYSKEYDOWN && msg.wParam == 'N' &&
             (GetKeyState(VK_MENU) & 0x8000)) {
             WinMeta* w = app_new_window(&app);
-            if (w) note_window_open(&app, w);
+            if (w) { note_window_place_cascade(&app, w); note_window_open(&app, w); }
             continue;
         }
         TranslateMessage(&msg);

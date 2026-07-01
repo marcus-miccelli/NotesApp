@@ -1399,6 +1399,35 @@ void note_window_register_class(HINSTANCE hInst) {
     RegisterClassExW(&wc);
 }
 
+/* Offset a NEW window's position in a cascade, down-right from the window the
+ * user was on (the foreground note window, else the most recent open one),
+ * wrapping to the work-area top-left when it would run off screen. The step is
+ * the system caption height + frame — the classic Windows cascade offset
+ * (~30px). Restored windows keep their saved geometry and must NOT call this. */
+void note_window_place_cascade(AppState* app, WinMeta* w) {
+    (void)app;
+    if (!w) return;
+    int step = GetSystemMetrics(SM_CYCAPTION) + GetSystemMetrics(SM_CYSIZEFRAME)
+             + GetSystemMetrics(SM_CXPADDEDBORDER);
+    if (step < 8) step = 30;                       /* sane fallback */
+
+    HWND ref = NULL;                               /* the window to cascade from */
+    HWND fg = GetForegroundWindow();
+    wchar_t cls[32];
+    if (fg && GetClassNameW(fg, cls, 32) && wcscmp(cls, NOTE_CLASS) == 0) ref = fg;
+    if (!ref)
+        for (int i = NW_REGISTRY_CAP - 1; i >= 0; i--)
+            if (s_registry[i].hwnd) { ref = s_registry[i].hwnd; break; }
+
+    RECT wa; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    int bx = w->x, by = w->y;
+    if (ref) { RECT rr; GetWindowRect(ref, &rr); bx = rr.left + step; by = rr.top + step; }
+    if (bx + w->w > wa.right || by + w->h > wa.bottom) { bx = wa.left + step; by = wa.top + step; }
+    if (bx < wa.left) bx = wa.left + step;
+    if (by < wa.top)  by = wa.top + step;
+    w->x = bx; w->y = by;
+}
+
 HWND note_window_open(AppState* app, WinMeta* win) {
     NoteWin* nw = calloc(1, sizeof *nw);
     if (!nw) return NULL;

@@ -42,7 +42,7 @@ static LRESULT CALLBACK owner_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
      * in this existing process instead of starting a duplicate instance. */
     if (msg == s_newwin_msg && s_newwin_msg != 0) {
         WinMeta* w = app_new_window(s_app);
-        if (w) note_window_open(s_app, w);
+        if (w) { note_window_place_cascade(s_app, w); note_window_open(s_app, w); }
         return 0;
     }
     switch (msg) {
@@ -54,7 +54,7 @@ static LRESULT CALLBACK owner_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         UINT id = LOWORD(wp);
         if (id == IDM_NEW) {
             WinMeta* w = app_new_window(s_app);
-            if (w) note_window_open(s_app, w);
+            if (w) { note_window_place_cascade(s_app, w); note_window_open(s_app, w); }
         } else if (id == IDM_QUIT) {
             PostQuitMessage(0);
         } else if (id >= IDM_NOTE0) {
@@ -67,7 +67,7 @@ static LRESULT CALLBACK owner_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     note_window_activate_note(existing, nid);
                 } else {
                     WinMeta* w = app_open_note_in_window(s_app, nid);
-                    if (w) note_window_open(s_app, w);
+                    if (w) { note_window_place_cascade(s_app, w); note_window_open(s_app, w); }
                 }
             }
         }
