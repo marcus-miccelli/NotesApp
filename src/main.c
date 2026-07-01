@@ -9,25 +9,39 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show) {
     if (!app_init(&app, NULL)) return 1;
     note_window_register_class(hInst);
 
-    /* open every note marked open; if none, create one */
-    int opened = 0;
-    for (size_t i = 0; i < app.prefs.count; i++) {
-        if (app.prefs.notes[i].open) { note_window_open(&app, &app.prefs.notes[i]); opened++; }
-    }
-    if (opened == 0) {
-        NoteMeta* m = app_new_note(&app);
-        if (m) note_window_open(&app, m);
+    /* open every saved window; on first run create one window + note */
+    if (app.prefs.wcount == 0) {
+        WinMeta* w = app_new_window(&app);     /* first run: one window, one note */
+        if (w) note_window_open(&app, w);
+    } else {
+        for (size_t i = 0; i < app.prefs.wcount; i++)
+            note_window_open(&app, &app.prefs.windows[i]);
     }
 
     if (!tray_init(&app, hInst)) return 1;
 
+    /* Plain dispatch — no IsDialogMessage. The note window is not a dialog;
+     * IsDialogMessage would treat Enter as a default-button press and swallow
+     * it before the multiline body could insert a newline. Most shortcuts are
+     * handled via the RichEdit EN_MSGFILTER, not accelerators.
+     *
+     * Alt+N (new window) is the exception: it is a system key (WM_SYSKEYDOWN)
+     * that RichEdit does not surface through EN_MSGFILTER, so intercept it here
+     * before dispatch. GetMessage delivers WM_SYSKEYDOWN whenever one of this
+     * app's windows has focus. Consuming it also avoids the menu-mode beep. */
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
-        if (!IsDialogMessageW(GetActiveWindow(), &msg)) {
-            TranslateMessage(&msg); DispatchMessageW(&msg);
+        if (msg.message == WM_SYSKEYDOWN && msg.wParam == 'N' &&
+            (GetKeyState(VK_MENU) & 0x8000)) {
+            WinMeta* w = app_new_window(&app);
+            if (w) note_window_open(&app, w);
+            continue;
         }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
     }
 
+    note_window_save_all();   /* flush every open window's geometry + tab bodies */
     tray_shutdown();
     app_shutdown(&app);   /* saves preferences.json */
     return 0;

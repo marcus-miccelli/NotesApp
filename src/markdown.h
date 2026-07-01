@@ -9,6 +9,7 @@ typedef unsigned MdFmt;
 #define MD_FMT_H1     (1u<<3)
 #define MD_FMT_H2     (1u<<4)
 #define MD_FMT_H3     (1u<<5)
+#define MD_FMT_STRIKE (1u<<6)
 
 typedef struct { size_t start; size_t len; MdFmt fmt; } MdSpan;
 

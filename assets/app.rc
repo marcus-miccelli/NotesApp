@@ -1,0 +1,4 @@
+#include "resource.h"
+
+/* Lowest-ID icon -> the icon Explorer shows for the .exe. */
+IDI_APP ICON "quicknote.ico"

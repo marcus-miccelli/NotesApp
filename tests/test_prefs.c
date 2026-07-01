@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <string.h>
 #include "test.h"
 #include "prefs.h"
@@ -8,12 +9,27 @@ void test_prefs(void) {
     CHECK(p.version == 1);
     CHECK_STR(p.theme, "dark");
     CHECK(p.count == 0);
+    CHECK(p.wcount == 0);
 
     NoteMeta* m = prefs_add_note(&p, "a1b2c3", "a1b2c3.md");
     CHECK(m != NULL);
     CHECK(p.count == 1);
-    m->x = 10; m->y = 20; m->w = 300; m->h = 400;
-    m->open = false; strcpy(m->color, "amber");
+    strcpy(m->color, "amber");
+    strcpy(m->name, "Hello");
+
+    /* window CRUD (in-memory; reload round-trip is verified in Task 2) */
+    WinMeta* w = prefs_add_window(&p, "w0001");
+    CHECK(w != NULL);
+    CHECK(p.wcount == 1);
+    CHECK(prefs_find_window(&p, "w0001") == w);
+    CHECK(prefs_find_window(&p, "nope") == NULL);
+    CHECK(prefs_remove_window(&p, "w0001"));
+    CHECK(p.wcount == 0);
+    /* re-add so the saved file carries a window for the Task 2 round-trip */
+    w = prefs_add_window(&p, "w0001");
+    CHECK(w != NULL);
+    w->x = 10; w->y = 20; w->w = 300; w->h = 400;
+    w->ntabs = 1; strcpy(w->tabs[0], "a1b2c3"); w->active = 0;
 
     const char* path = "C:\\tmp\\sntest_prefs.json";
     CHECK(prefs_save(&p, path));
@@ -21,24 +37,29 @@ void test_prefs(void) {
 
     Prefs q;
     CHECK(prefs_load(&q, path));
-    CHECK(q.version == 1);
     CHECK(q.count == 1);
     NoteMeta* r = prefs_find(&q, "a1b2c3");
     CHECK(r != NULL);
     CHECK_STR(r->file, "a1b2c3.md");
-    CHECK(r->x == 10 && r->y == 20 && r->w == 300 && r->h == 400);
-    CHECK(r->open == false);
     CHECK_STR(r->color, "amber");
+    CHECK_STR(r->name, "Hello");
+
+    WinMeta* rw = prefs_find_window(&q, "w0001");
+    CHECK(rw != NULL);
+    CHECK(rw->x == 10 && rw->y == 20 && rw->w == 300 && rw->h == 400);
+    CHECK(rw->ntabs == 1 && rw->active == 0);
+    CHECK_STR(rw->tabs[0], "a1b2c3");
+    CHECK(prefs_remove_window(&q, "w0001"));
+    CHECK(q.wcount == 0);
 
     CHECK(prefs_remove(&q, "a1b2c3"));
     CHECK(q.count == 0);
-    CHECK(prefs_find(&q, "a1b2c3") == NULL);
     prefs_free(&q);
 
     /* missing file -> false but usable default */
     Prefs z;
     CHECK(!prefs_load(&z, "C:\\tmp\\sntest_does_not_exist.json"));
-    CHECK(z.version == 1 && z.count == 0);
+    CHECK(z.version == 1 && z.count == 0 && z.wcount == 0);
     prefs_free(&z);
 
     /* corrupt file -> false + defaults + a .bak backup with the original bytes */
@@ -51,11 +72,10 @@ void test_prefs(void) {
     if (cf) { fputs(corrupt_bytes, cf); fclose(cf); }
 
     Prefs c;
-    CHECK(!prefs_load(&c, corrupt_path));        /* corrupt -> false */
-    CHECK(c.version == 1 && c.count == 0);       /* defaults */
+    CHECK(!prefs_load(&c, corrupt_path));
+    CHECK(c.version == 1 && c.count == 0);
     prefs_free(&c);
 
-    /* the .bak now exists and holds the original corrupt bytes */
     FILE* bf = fopen(bak_path, "rb");
     CHECK(bf != NULL);
     if (bf) {
@@ -65,4 +85,31 @@ void test_prefs(void) {
     }
     remove(corrupt_path);
     remove(bak_path);
+}
+
+void test_prefs_migration(void) {
+    /* hand-write a v1 prefs: two notes, one open (with geometry), one closed */
+    const char* path = "C:\\tmp\\sntest_prefs_v1.json";
+    const char* v1 =
+        "{\"version\":1,\"theme\":\"dark\",\"notes\":["
+        "{\"id\":\"open01\",\"file\":\"open01.md\",\"name\":\"Open\","
+        "\"x\":11,\"y\":22,\"w\":333,\"h\":444,\"color\":\"slate\",\"open\":true},"
+        "{\"id\":\"shut01\",\"file\":\"shut01.md\",\"name\":\"Shut\","
+        "\"x\":1,\"y\":2,\"w\":3,\"h\":4,\"color\":\"slate\",\"open\":false}"
+        "]}";
+    FILE* f = fopen(path, "wb");
+    CHECK(f != NULL);
+    if (f) { fputs(v1, f); fclose(f); }
+
+    Prefs p;
+    CHECK(prefs_load(&p, path));
+    CHECK(p.count == 2);                 /* both notes kept */
+    CHECK(p.wcount == 1);                /* one window for the open note */
+    WinMeta* w = &p.windows[0];
+    CHECK(w->ntabs == 1);
+    CHECK_STR(w->tabs[0], "open01");
+    CHECK(w->x == 11 && w->y == 22 && w->w == 333 && w->h == 444);
+    CHECK(prefs_find(&p, "shut01") != NULL);   /* closed note still present */
+    prefs_free(&p);
+    remove(path);
 }

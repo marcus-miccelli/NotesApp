@@ -1,6 +1,8 @@
 #include "tray.h"
 #include "note_window.h"
+#include "resource.h"
 #include <shellapi.h>
+#include <stdio.h>
 #include <string.h>
 #include <wchar.h>
 
@@ -20,9 +22,11 @@ static void tray_show_menu(HWND hwnd) {
     AppendMenuW(m, MF_STRING, IDM_NEW, L"New Note");
     if (s_app->prefs.count > 0) AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     for (size_t i = 0; i < s_app->prefs.count; i++) {
-        wchar_t label[64];
+        wchar_t label[96];
         const NoteMeta* nm = &s_app->prefs.notes[i];
-        swprintf(label, 64, L"%hs%s", nm->id, nm->open ? L"  (open)" : L"");
+        const char* disp = nm->name[0] ? nm->name : nm->id;
+        int open = note_window_find_by_note(nm->id) != NULL;
+        swprintf(label, 96, L"%hs%s", disp, open ? L"  (open)" : L"");
         AppendMenuW(m, MF_STRING, IDM_NOTE0 + (UINT)i, label);
     }
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
@@ -41,17 +45,22 @@ static LRESULT CALLBACK owner_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND: {
         UINT id = LOWORD(wp);
         if (id == IDM_NEW) {
-            NoteMeta* m = app_new_note(s_app);
-            if (m) note_window_open(s_app, m);
+            WinMeta* w = app_new_window(s_app);
+            if (w) note_window_open(s_app, w);
         } else if (id == IDM_QUIT) {
             PostQuitMessage(0);
         } else if (id >= IDM_NOTE0) {
             size_t i = id - IDM_NOTE0;
             if (i < s_app->prefs.count) {
                 NoteMeta* nm = &s_app->prefs.notes[i];
-                HWND existing = note_window_find_open(nm->id);
-                if (existing) SetForegroundWindow(existing);
-                else note_window_open(s_app, nm);
+                char nid[16]; snprintf(nid, sizeof nid, "%s", nm->id);
+                HWND existing = note_window_find_by_note(nid);
+                if (existing) {
+                    note_window_activate_note(existing, nid);
+                } else {
+                    WinMeta* w = app_open_note_in_window(s_app, nid);
+                    if (w) note_window_open(s_app, w);
+                }
             }
         }
         return 0;
@@ -76,8 +85,9 @@ bool tray_init(AppState* app, HINSTANCE hInst) {
     s_nid.uID = TRAY_UID;
     s_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     s_nid.uCallbackMessage = WM_TRAY;
-    s_nid.hIcon = LoadIconW(NULL, MAKEINTRESOURCEW(32512)); /* IDI_APPLICATION */
-    wcscpy(s_nid.szTip, L"Sticky Notes");
+    s_nid.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP)); /* qN */
+    if (!s_nid.hIcon) s_nid.hIcon = LoadIconW(NULL, MAKEINTRESOURCEW(32512));
+    wcscpy(s_nid.szTip, L"quickNote");
     if (!Shell_NotifyIconW(NIM_ADD, &s_nid)) {
         DestroyWindow(s_owner);
         s_owner = NULL;
