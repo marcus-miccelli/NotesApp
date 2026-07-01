@@ -898,6 +898,7 @@ static void nw_sync_winmeta(NoteWin* nw) {
     w->ntabs = nw->ntabs; w->active = nw->active;
     for (int i = 0; i < nw->ntabs; i++)
         snprintf(w->tabs[i], sizeof w->tabs[i], "%s", nw->tab[i].id);
+    app_persist(nw->app);   /* session changed (add/close/reorder/activate) — save now */
 }
 
 /* Show tab i, hide the previous active one. No-op if i is invalid or already
@@ -925,6 +926,7 @@ static void nw_remove_tab(NoteWin* nw, HWND hwnd, int i) {
     if (nw->ntabs == 0) {
         WinMeta* w = nw_win(nw);
         if (w) prefs_remove_window(&nw->app->prefs, w->id);
+        app_persist(nw->app);   /* window gone — persist before it's destroyed */
         DestroyWindow(hwnd);
         return;   /* WM_DESTROY frees nw — do NOT touch nw after this */
     }
@@ -1038,7 +1040,7 @@ static void nw_commit_rename(NoteWin* nw, HWND hwnd, int accept) {
         size_t n = strlen(s); while (n > 0 && s[n-1] == ' ') s[--n] = '\0';
         if (s[0]) {
             NoteMeta* m = prefs_find(&nw->app->prefs, nw->tab[nw->rename_tab].id);
-            if (m) { snprintf(m->name, sizeof m->name, "%s", s); nw_save_tab(nw, nw->rename_tab); }
+            if (m) { snprintf(m->name, sizeof m->name, "%s", s); nw_save_tab(nw, nw->rename_tab); app_persist(nw->app); }
         }
     }
     DestroyWindow(e);
@@ -1323,6 +1325,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         WinMeta* w = nw_win(nw);
         if (!w) return 0;
         nw_save_geometry(hwnd, w);
+        app_persist(nw->app);   /* geometry moved — persist for session restore */
         return 0;
     }
     case WM_DRAWITEM:
@@ -1408,7 +1411,7 @@ HWND note_window_open(AppState* app, WinMeta* win) {
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VISIBLE,
         win->x, win->y, win->w, win->h,
         NULL, NULL, GetModuleHandleW(NULL), nw);
-    if (h) nw_registry_add(nw->win_id, h);
+    if (h) { nw_registry_add(nw->win_id, h); app_persist(app); }
     else   free(nw);
     return h;
 }
@@ -1424,6 +1427,7 @@ void note_window_close(HWND hwnd) {
             /* Remove from prefs: the X-closed window should not reopen next launch.
              * The notes themselves remain in prefs.notes and on disk. */
             prefs_remove_window(&nw->app->prefs, w->id);
+            app_persist(nw->app);   /* window closed — persist for session restore */
         }
     }
     DestroyWindow(hwnd);

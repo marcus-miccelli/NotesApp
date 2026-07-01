@@ -14,6 +14,13 @@ bool app_init(AppState* a, const char* root_override) {
     return true;
 }
 
+/* Write the current preferences (open windows + their tabs + notes) to disk now.
+ * Called on every session change so a cold start always resumes the last state,
+ * regardless of how the app exited (clean Quit, crash, or kill). */
+void app_persist(AppState* a) {
+    prefs_save(&a->prefs, a->paths.prefs);
+}
+
 void app_shutdown(AppState* a) {
     prefs_save(&a->prefs, a->paths.prefs);
     prefs_free(&a->prefs);
