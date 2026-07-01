@@ -78,7 +78,6 @@ typedef enum { HIT_NONE, HIT_TAB, HIT_CLOSE, HIT_PLUS } TabHit;
 static const COLORREF COL_BG      = RGB(0x0C, 0x0C, 0x0C);  /* app background */
 static const COLORREF COL_TEXT    = RGB(0xe6, 0xe6, 0xe6);
 static const COLORREF COL_BORDER  = RGB(0x2a, 0x2a, 0x2e);  /* dividers */
-static const COLORREF COL_TOGGLE  = RGB(0x3a, 0x3a, 0x46);  /* sidebar button active/pressed */
 static const COLORREF COL_CLOSE   = RGB(0xc0, 0x3a, 0x3a);  /* close button hover */
 static const COLORREF COL_HOVER   = RGB(0x26, 0x26, 0x2b);  /* min/max + control hover */
 static const COLORREF COL_TAB_ACT = RGB(0x1b, 0x1b, 0x1f);  /* active tab fill */
@@ -98,7 +97,6 @@ typedef struct {
     int   ntabs;
     int   active;
     HWND  btns[NUM_BTNS];
-    HWND  wbtns[NUM_WBTNS];
     int   whot[NUM_WBTNS];
     int   active_fmt[NUM_BTNS];
     /* tab hover state (WT look) */
@@ -152,6 +150,24 @@ static int nw_window_buttons_width(HWND hwnd) {
 static int nw_window_buttons_left(HWND hwnd) {
     RECT rc; GetClientRect(hwnd, &rc);
     return rc.right - nw_window_buttons_width(hwnd);
+}
+
+/* Rect of window button i (0=min, 1=max, 2=close), right-aligned in the
+ * titlebar, each WINBTN_W wide and the full titlebar tall. */
+static void nw_wbtn_rect(HWND hwnd, int i, RECT* r) {
+    RECT rc; GetClientRect(hwnd, &rc);
+    int w = nw_s(hwnd, WINBTN_W);
+    int right = rc.right - (NUM_WBTNS - 1 - i) * w;
+    SetRect(r, right - w, 0, right, nw_titlebar_h(hwnd));
+}
+
+/* Window button under (cx,cy) in client coords, or -1. */
+static int nw_wbtn_hit(HWND hwnd, int cx, int cy) {
+    for (int i = 0; i < NUM_WBTNS; i++) {
+        RECT r; nw_wbtn_rect(hwnd, i, &r);
+        if (cx >= r.left && cx < r.right && cy >= r.top && cy < r.bottom) return i;
+    }
+    return -1;
 }
 
 /* Resolve the WinMeta* / active tab fresh at point of use. prefs arrays can be
@@ -303,12 +319,6 @@ static void nw_layout(HWND hwnd, NoteWin* nw) {
         MoveWindow(nw->btns[i], 0, hy + 1 + i * (side + gap), side, side, TRUE);
     }
 
-    int wbtn_w = nw_s(hwnd, WINBTN_W);
-    for (int i = 0; i < NUM_WBTNS; i++) {
-        MoveWindow(nw->wbtns[i], rc.right - (NUM_WBTNS - i) * wbtn_w, 0,
-                   wbtn_w, nw_titlebar_h(hwnd), TRUE);
-    }
-
     for (int i = 0; i < nw->ntabs; i++) {
         MoveWindow(nw->tab[i].edit, bd.left, bd.top,
                    bd.right - bd.left, bd.bottom - bd.top, TRUE);
@@ -342,58 +352,6 @@ static void nw_draw_button(NoteWin* nw, const DRAWITEMSTRUCT* d) {
 
     SelectObject(d->hDC, old);
     DeleteObject(f);
-}
-
-/* Owner-draw a window caption button (min/max/close) like the native ones:
- * transparent until hovered/pressed (close goes red), with a Segoe MDL2 Assets
- * glyph. The maximize button shows the restore glyph while the window is zoomed. */
-static void nw_draw_wbutton(NoteWin* nw, HWND parent, const DRAWITEMSTRUCT* d) {
-    int idx = (int)d->CtlID - IDW_MIN;
-    int hot = (idx >= 0 && idx < NUM_WBTNS && nw->whot[idx]);
-    int pressed = (d->itemState & ODS_SELECTED) != 0;
-
-    COLORREF fill = COL_BG;
-    if (d->CtlID == IDW_CLOSE) { if (hot || pressed) fill = COL_CLOSE; }
-    else if (pressed)          fill = COL_TOGGLE;
-    else if (hot)              fill = COL_HOVER;
-    HBRUSH bg = CreateSolidBrush(fill);
-    FillRect(d->hDC, &d->rcItem, bg);
-    DeleteObject(bg);
-
-    const wchar_t* glyph = L"\xE921";                      /* min */
-    if (d->CtlID == IDW_MAX)   glyph = IsZoomed(parent) ? L"\xE923" : L"\xE922"; /* restore/max */
-    if (d->CtlID == IDW_CLOSE) glyph = L"\xE8BB";          /* close */
-
-    LOGFONTW lf; memset(&lf, 0, sizeof lf);
-    lf.lfHeight = -nw_s(d->hwndItem, 10); lf.lfWeight = FW_NORMAL; wcscpy(lf.lfFaceName, L"Segoe MDL2 Assets");
-    HFONT f = CreateFontIndirectW(&lf);
-    HFONT old = (HFONT)SelectObject(d->hDC, f);
-    SetBkMode(d->hDC, TRANSPARENT);
-    SetTextColor(d->hDC, RGB(0xe6,0xe6,0xe6));
-    RECT r = d->rcItem;
-    DrawTextW(d->hDC, glyph, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(d->hDC, old);
-    DeleteObject(f);
-}
-
-/* Subclass for caption buttons: track hover so the button highlights like the
- * native ones (BS_OWNERDRAW alone gives no hot state). */
-static LRESULT CALLBACK nw_wbtn_sub(HWND h, UINT msg, WPARAM wp, LPARAM lp,
-                                    UINT_PTR id, DWORD_PTR ref) {
-    NoteWin* nw = (NoteWin*)ref;
-    (void)wp; (void)lp;
-    if (msg == WM_MOUSEMOVE) {
-        if (!nw->whot[id]) {
-            nw->whot[id] = 1;
-            TRACKMOUSEEVENT tme = { sizeof tme, TME_LEAVE, h, 0 };
-            TrackMouseEvent(&tme);
-            InvalidateRect(h, NULL, TRUE);
-        }
-    } else if (msg == WM_MOUSELEAVE) {
-        nw->whot[id] = 0;
-        InvalidateRect(h, NULL, TRUE);
-    }
-    return DefSubclassProc(h, msg, wp, lp);
 }
 
 /* Read the body as RichEdit-indexed text (\r breaks, CP_ACP); caller frees.
@@ -1244,6 +1202,20 @@ static void nw_paint_chrome(NoteWin* nw, HWND hwnd) {
     RECT mark = { 0, 0, vx, hy };
     gfx_text(nw->gfx, L"qN", mark, GFX_FMT_MARK, COL_TEXT);
 
+    for (int i = 0; i < NUM_WBTNS; i++) {
+        RECT wr; nw_wbtn_rect(hwnd, i, &wr);
+        int is_close = (i == 2);
+        unsigned fill = COL_BG;
+        if (is_close) { if (nw->whot[i]) fill = COL_CLOSE; }
+        else if (nw->whot[i]) fill = COL_HOVER;
+        if (fill != COL_BG) gfx_fill_rect(nw->gfx, wr, fill);
+
+        const wchar_t* glyph = L"\xE921";                 /* min */
+        if (i == 1) glyph = IsZoomed(hwnd) ? L"\xE923" : L"\xE922";  /* restore/max */
+        if (i == 2) glyph = L"\xE8BB";                    /* close */
+        gfx_text(nw->gfx, glyph, wr, GFX_FMT_WGLYPH, COL_TEXT);
+    }
+
     nw_paint_tabs(nw, hwnd);
 }
 
@@ -1271,19 +1243,6 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                 0, 0, SIDEBAR_W, SIDEBAR_W, hwnd,   /* real size set in nw_layout */
                 (HMENU)(INT_PTR)btndefs[i].id, cs->hInstance, NULL);
-        }
-
-        /* Window-chrome buttons: minimize, maximize, close. They are custom
-         * because the client owns the caption area for the Terminal-style tabs. */
-        static const struct { int id; const wchar_t* glyph; } wbtndefs[NUM_WBTNS] = {
-            { IDW_MIN, L"\x2013" }, { IDW_MAX, L"\x25A1" }, { IDW_CLOSE, L"\x2715" },
-        };
-        for (int i = 0; i < NUM_WBTNS; i++) {
-            nw->wbtns[i] = CreateWindowExW(0, L"BUTTON", wbtndefs[i].glyph,
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                0, 0, WINBTN_W, TITLE_CONTENT_H, hwnd,
-                (HMENU)(INT_PTR)wbtndefs[i].id, cs->hInstance, NULL);
-            SetWindowSubclass(nw->wbtns[i], nw_wbtn_sub, (UINT_PTR)i, (DWORD_PTR)nw);
         }
 
         /* Custom frame: extend the client over the caption (so we draw the title
@@ -1327,7 +1286,6 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             nw_layout(hwnd, nw);
             InvalidateRect(hwnd, NULL, TRUE);
-            if (nw->wbtns[1]) InvalidateRect(nw->wbtns[1], NULL, TRUE);
         }
         return 0;
     case WM_PAINT: {
@@ -1429,6 +1387,10 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_LBUTTONDOWN:
         if (nw) {
+            int wb = nw_wbtn_hit(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            if (wb == 0) { ShowWindow(hwnd, SW_MINIMIZE); return 0; }
+            if (wb == 1) { ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE); return 0; }
+            if (wb == 2) { SendMessageW(hwnd, WM_CLOSE, 0, 0); return 0; }
             int idx = -1;
             TabHit h = nw_tab_hit(nw, hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &idx);
             if (h == HIT_PLUS)  { nw_add_tab(nw, hwnd); return 0; }
@@ -1476,7 +1438,15 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (h == HIT_TAB)        ht = idx;
             else if (h == HIT_CLOSE) { ht = idx; hc = 1; }
             else if (h == HIT_PLUS)  hp = 1;
-            if (ht != nw->hot_tab || hc != nw->hot_close || hp != nw->hot_plus) {
+
+            int wb = nw_wbtn_hit(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            int wchanged = 0;
+            for (int i = 0; i < NUM_WBTNS; i++) {
+                int on = (i == wb);
+                if (on != nw->whot[i]) { nw->whot[i] = on; wchanged = 1; }
+            }
+
+            if (ht != nw->hot_tab || hc != nw->hot_close || hp != nw->hot_plus || wchanged) {
                 nw->hot_tab = ht; nw->hot_close = hc; nw->hot_plus = hp;
                 RECT bar; GetClientRect(hwnd, &bar); bar.bottom = nw_titlebar_h(hwnd);
                 InvalidateRect(hwnd, &bar, TRUE);
@@ -1486,10 +1456,15 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_MOUSELEAVE:
-        if (nw && (nw->hot_tab != -1 || nw->hot_close || nw->hot_plus)) {
-            nw->hot_tab = -1; nw->hot_close = 0; nw->hot_plus = 0;
-            RECT bar; GetClientRect(hwnd, &bar); bar.bottom = nw_titlebar_h(hwnd);
-            InvalidateRect(hwnd, &bar, TRUE);
+        if (nw) {
+            int wchanged = 0;
+            for (int i = 0; i < NUM_WBTNS; i++)
+                if (nw->whot[i]) { nw->whot[i] = 0; wchanged = 1; }
+            if (nw->hot_tab != -1 || nw->hot_close || nw->hot_plus || wchanged) {
+                nw->hot_tab = -1; nw->hot_close = 0; nw->hot_plus = 0;
+                RECT bar; GetClientRect(hwnd, &bar); bar.bottom = nw_titlebar_h(hwnd);
+                InvalidateRect(hwnd, &bar, TRUE);
+            }
         }
         return 0;
     case WM_LBUTTONUP:
@@ -1539,10 +1514,6 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             nw_draw_button(nw, (const DRAWITEMSTRUCT*)lp);
             return TRUE;
         }
-        if (nw && wp >= IDW_MIN && wp <= IDW_CLOSE) {
-            nw_draw_wbutton(nw, hwnd, (const DRAWITEMSTRUCT*)lp);
-            return TRUE;
-        }
         return 0;
     case WM_COMMAND:
         if (HIWORD(wp) == BN_CLICKED && nw) {
@@ -1552,9 +1523,6 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             case IDB_STRIKE: nw_wrap_inline(nw, "~~", 2); break;
             case IDB_BULLET: nw_list_prefix(nw, 0);    break;
             case IDB_NUM:    nw_list_prefix(nw, 1);    break;
-            case IDW_MIN:    ShowWindow(hwnd, SW_MINIMIZE); return 0;
-            case IDW_MAX:    ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE); return 0;
-            case IDW_CLOSE:  SendMessageW(hwnd, WM_CLOSE, 0, 0); return 0;
             default: return 0;
             }
             if (nw_edit(nw)) SetFocus(nw_edit(nw));   /* return focus to the body after a click */
