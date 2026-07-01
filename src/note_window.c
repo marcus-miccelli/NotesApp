@@ -40,12 +40,16 @@
 #define WINBTN_W     46    /* min/max/close button width (native caption width) */
 #define BTN_GAP      3     /* between sidebar buttons */
 
-/* Tab strip geometry (px). */
+/* Tab strip geometry (px). Windows-Terminal look: tabs are nested in the bar
+ * (a gap above so they don't span it) with rounded top corners, and the ✕ / +
+ * controls are uniform squares. */
 #define DRAG_GAP      36   /* gap between last tab/+ and the window buttons */
-#define PLUS_W        28   /* width of the + add-tab button */
+#define TAB_TOP_GAP    6   /* gap between the title-bar top and a tab's top */
+#define TAB_RADIUS     7   /* rounded top-corner radius of a tab */
+#define CTL_SIZE      18   /* uniform square for the ✕ (per tab) and the + */
+#define PLUS_GAP       8   /* gap between the last tab and the + button */
 #define TAB_MIN       48   /* minimum tab width */
 #define TAB_MAX      200   /* maximum tab width */
-#define TAB_CLOSE_W   18   /* per-tab close (✕) region on the right */
 #define DRAG_THRESHOLD 6   /* px movement before a tab drag begins (Task 8) */
 
 typedef enum { HIT_NONE, HIT_TAB, HIT_CLOSE, HIT_PLUS } TabHit;
@@ -61,13 +65,17 @@ typedef enum { HIT_NONE, HIT_TAB, HIT_CLOSE, HIT_PLUS } TabHit;
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
 
-/* Dark palette */
-static const COLORREF COL_BG     = RGB(0x1e, 0x1e, 0x22);
-static const COLORREF COL_TEXT   = RGB(0xe6, 0xe6, 0xe6);
-static const COLORREF COL_BORDER = RGB(0x44, 0x44, 0x4e);  /* region outlines */
-static const COLORREF COL_TOGGLE = RGB(0x3a, 0x3a, 0x46);  /* pressed button fill */
-static const COLORREF COL_CLOSE  = RGB(0xc0, 0x3a, 0x3a);  /* close button hover */
-static const COLORREF COL_HOVER  = RGB(0x3a, 0x3a, 0x44);  /* min/max button hover */
+/* Dark palette (Windows-Terminal-inspired: near-black bg) */
+static const COLORREF COL_BG      = RGB(0x0C, 0x0C, 0x0C);  /* app background */
+static const COLORREF COL_TEXT    = RGB(0xe6, 0xe6, 0xe6);
+static const COLORREF COL_BORDER  = RGB(0x2a, 0x2a, 0x2e);  /* dividers */
+static const COLORREF COL_TOGGLE  = RGB(0x3a, 0x3a, 0x46);  /* sidebar button active/pressed */
+static const COLORREF COL_CLOSE   = RGB(0xc0, 0x3a, 0x3a);  /* close button hover */
+static const COLORREF COL_HOVER   = RGB(0x26, 0x26, 0x2b);  /* min/max + control hover */
+static const COLORREF COL_TAB_ACT = RGB(0x1b, 0x1b, 0x1f);  /* active tab fill */
+static const COLORREF COL_TAB_HOT = RGB(0x15, 0x15, 0x17);  /* hovered tab fill */
+static const COLORREF COL_RENAME  = RGB(0x0f, 0x0f, 0x12);  /* rename field bg */
+static const COLORREF COL_ACCENT  = RGB(0x3a, 0x7a, 0xfe);  /* rename outline */
 
 typedef struct {
     char id[16];      /* note id */
@@ -84,6 +92,10 @@ typedef struct {
     HWND  wbtns[NUM_WBTNS];
     int   whot[NUM_WBTNS];
     int   active_fmt[NUM_BTNS];
+    /* tab hover state (WT look) */
+    int   hot_tab;    /* index of tab under the cursor, or -1 */
+    int   hot_close;  /* 1 when the cursor is over the hot tab's ✕ */
+    int   hot_plus;   /* 1 when the cursor is over the + button */
     /* drag-to-reorder state (Task 9) */
     int   drag_tab;   /* index of tab being dragged, or -1 when idle */
     int   drag_dx;    /* cursor x-offset from the tab's left edge at press */
@@ -98,6 +110,7 @@ typedef struct {
 static HMODULE g_richedit = NULL;
 static HBRUSH  g_bg_brush = NULL;     /* class background, dark; created once */
 static HBRUSH  g_border_brush = NULL; /* region outline; created once */
+static HBRUSH  g_rename_brush = NULL; /* rename-field background; created once */
 static HICON   g_app_icon = NULL;     /* qN, painted in the top-left cell */
 
 static NoteWin* nw_get(HWND h) { return (NoteWin*)GetWindowLongPtrW(h, GWLP_USERDATA); }
@@ -176,20 +189,29 @@ static int nw_strip_right(HWND hwnd) {
     return btns_l - DRAG_GAP;
 }
 static int nw_tab_w(NoteWin* nw, HWND hwnd) {
-    int avail = nw_strip_right(hwnd) - nw_strip_left() - PLUS_W;
+    int avail = nw_strip_right(hwnd) - nw_strip_left() - (CTL_SIZE + PLUS_GAP);
     int n = nw->ntabs > 0 ? nw->ntabs : 1;
     int w = avail / n;
     if (w > TAB_MAX) w = TAB_MAX;
     if (w < TAB_MIN) w = TAB_MIN;
     return w;
 }
+/* Full-height hit rect for tab i (easier click target than the drawn shape). */
 static void nw_tab_rect(NoteWin* nw, HWND hwnd, int i, RECT* r) {
     int w = nw_tab_w(nw, hwnd), l = nw_strip_left() + i * w;
     SetRect(r, l, 0, l + w, TITLEBAR_H);
 }
+/* The uniform ✕ square inside tab i, right-aligned with a small pad. */
+static void nw_close_rect(NoteWin* nw, HWND hwnd, int i, RECT* r) {
+    RECT t; nw_tab_rect(nw, hwnd, i, &t);
+    int cx = t.right - 6 - CTL_SIZE, cy = (TITLEBAR_H - CTL_SIZE) / 2 + TAB_TOP_GAP / 2;
+    SetRect(r, cx, cy, cx + CTL_SIZE, cy + CTL_SIZE);
+}
+/* The uniform + square, PLUS_GAP after the last tab, aligned with the ✕. */
 static void nw_plus_rect(NoteWin* nw, HWND hwnd, RECT* r) {
-    int w = nw_tab_w(nw, hwnd), l = nw_strip_left() + nw->ntabs * w;
-    SetRect(r, l, 0, l + PLUS_W, TITLEBAR_H);
+    int w = nw_tab_w(nw, hwnd), l = nw_strip_left() + nw->ntabs * w + PLUS_GAP;
+    int cy = (TITLEBAR_H - CTL_SIZE) / 2 + TAB_TOP_GAP / 2;
+    SetRect(r, l, cy, l + CTL_SIZE, cy + CTL_SIZE);
 }
 static TabHit nw_tab_hit(NoteWin* nw, HWND hwnd, int cx, int cy, int* out_idx) {
     if (cy < 0 || cy >= TITLEBAR_H) return HIT_NONE;
@@ -197,7 +219,7 @@ static TabHit nw_tab_hit(NoteWin* nw, HWND hwnd, int cx, int cy, int* out_idx) {
         RECT r; nw_tab_rect(nw, hwnd, i, &r);
         if (cx >= r.left && cx < r.right) {
             if (out_idx) *out_idx = i;
-            if (cx >= r.right - TAB_CLOSE_W) return HIT_CLOSE;
+            if (cx >= r.right - CTL_SIZE - 8) return HIT_CLOSE;
             return HIT_TAB;
         }
     }
@@ -546,8 +568,7 @@ static void nw_set_range_fmt(HWND edit, size_t start, size_t len, MdFmt fmt) {
         cf.dwEffects |= CFE_BOLD;
     if (fmt & MD_FMT_ITALIC) cf.dwEffects |= CFE_ITALIC;
     if (fmt & MD_FMT_STRIKE) cf.dwEffects |= CFE_STRIKEOUT;
-    if (fmt & MD_FMT_CODE) wcscpy(cf.szFaceName, L"Consolas");
-    else wcscpy(cf.szFaceName, L"Segoe UI");
+    wcscpy(cf.szFaceName, L"IBM Plex Mono");   /* notes are IBM Plex Mono throughout */
     SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
 
     SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&saved);  /* restore caret */
@@ -628,7 +649,7 @@ static void nw_apply_format_edit(NoteWin* nw, int i) {
     /* CFM_HIDDEN (effect off) un-hides everything so deleted/moved markers
      * reappear before we re-hide the current ones. */
     base.dwMask = CFM_BOLD|CFM_ITALIC|CFM_STRIKEOUT|CFM_SIZE|CFM_FACE|CFM_COLOR|CFM_HIDDEN;
-    base.yHeight = 200; base.crTextColor = COL_TEXT; wcscpy(base.szFaceName, L"Segoe UI");
+    base.yHeight = 200; base.crTextColor = COL_TEXT; wcscpy(base.szFaceName, L"IBM Plex Mono");
     SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&base);
 
     MdSpan spans[256];
@@ -963,7 +984,8 @@ static void nw_add_tab(NoteWin* nw, HWND hwnd) {
         0, 0, 100, 100, hwnd, (HMENU)ID_EDIT, GetModuleHandleW(NULL), NULL);
     SendMessageW(nw->tab[i].edit, EM_SETBKGNDCOLOR, 0, (LPARAM)COL_BG);
     CHARFORMAT2W cf; memset(&cf, 0, sizeof cf);
-    cf.cbSize = sizeof cf; cf.dwMask = CFM_COLOR; cf.crTextColor = COL_TEXT;
+    cf.cbSize = sizeof cf; cf.dwMask = CFM_COLOR | CFM_FACE | CFM_SIZE;
+    cf.crTextColor = COL_TEXT; cf.yHeight = 200; wcscpy(cf.szFaceName, L"IBM Plex Mono");
     SendMessageW(nw->tab[i].edit, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
     SendMessageW(nw->tab[i].edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
     nw_load_tab(nw, i);
@@ -1011,21 +1033,32 @@ static LRESULT CALLBACK nw_rename_sub(HWND h, UINT msg, WPARAM wp, LPARAM lp,
     return DefSubclassProc(h, msg, wp, lp);
 }
 
+/* The rename field's rect: nested inside the tab being renamed, leaving room for
+ * the 2px accent frame drawn around it. Shared by begin_rename and the painter. */
+static void nw_rename_rect(NoteWin* nw, HWND hwnd, RECT* r) {
+    RECT t; nw_tab_rect(nw, hwnd, nw->rename_tab, &t);
+    int ex = t.left + 8, ey = TAB_TOP_GAP + 3;
+    int ew = (t.right - t.left) - 16; if (ew < 40) ew = 40;
+    int eh = TITLEBAR_H - TAB_TOP_GAP - 6;
+    SetRect(r, ex, ey, ex + ew, ey + eh);
+}
+
 static void nw_begin_rename(NoteWin* nw, HWND hwnd) {
     if (nw->rename_edit || nw->ntabs == 0) return;
     int i = nw->active;
-    RECT r; nw_tab_rect(nw, hwnd, i, &r);
     NoteMeta* m = prefs_find(&nw->app->prefs, nw->tab[i].id);
     nw->rename_tab = i;
+    RECT er; nw_rename_rect(nw, hwnd, &er);
     nw->rename_edit = CreateWindowExW(0, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-        r.left + 4, 5, (r.right - r.left) - 8, TITLEBAR_H - 10,
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,     /* no border — we draw an accent frame */
+        er.left, er.top, er.right - er.left, er.bottom - er.top,
         hwnd, (HMENU)ID_RENAME, GetModuleHandleW(NULL), NULL);
-    nw->rename_font = CreateFontW(-15,0,0,0,FW_SEMIBOLD,0,0,0,0,0,0,0,0,L"Segoe UI");
+    nw->rename_font = CreateFontW(-14,0,0,0,FW_SEMIBOLD,0,0,0,0,0,0,0,0,L"Segoe UI");
     SendMessageW(nw->rename_edit, WM_SETFONT, (WPARAM)nw->rename_font, TRUE);
     SetWindowTextA(nw->rename_edit, m && m->name[0] ? m->name : "");
     SendMessageW(nw->rename_edit, EM_SETSEL, 0, -1);
     SetWindowSubclass(nw->rename_edit, nw_rename_sub, 0, (DWORD_PTR)nw);
+    InvalidateRect(hwnd, NULL, FALSE);   /* draw the accent frame */
     SetFocus(nw->rename_edit);
 }
 
@@ -1074,35 +1107,78 @@ static LRESULT nw_handle_key(NoteWin* nw, HWND hwnd, const MSGFILTER* mf) {
     return 0;
 }
 
-/* Draw Windows-Terminal-style tab strip in the title bar area. */
+/* Fill a rounded rectangle (all corners) — used for the ✕ / + hover squares. */
+static void nw_fill_round(HDC hdc, const RECT* rc, int radius, COLORREF col) {
+    HBRUSH b = CreateSolidBrush(col);
+    HRGN rgn = CreateRoundRectRgn(rc->left, rc->top, rc->right + 1, rc->bottom + 1,
+                                  radius * 2, radius * 2);
+    FillRgn(hdc, rgn, b);
+    DeleteObject(rgn); DeleteObject(b);
+}
+
+/* Fill a shape with rounded TOP corners and a flat bottom (a WT tab). Built by
+ * AND-ing a tall round-rect (so only its top corners fall inside) with a rect
+ * clipped to the tab's bottom. */
+static void nw_fill_round_top(HDC hdc, const RECT* rc, int radius, COLORREF col) {
+    HBRUSH b = CreateSolidBrush(col);
+    HRGN round = CreateRoundRectRgn(rc->left, rc->top, rc->right + 1,
+                                    rc->bottom + radius * 2, radius * 2, radius * 2);
+    HRGN clip  = CreateRectRgn(rc->left, rc->top, rc->right + 1, rc->bottom + 1);
+    CombineRgn(round, round, clip, RGN_AND);
+    FillRgn(hdc, round, b);
+    DeleteObject(round); DeleteObject(clip); DeleteObject(b);
+}
+
+/* Draw the Windows-Terminal-style tab strip: tabs nested in the bar (a gap
+ * above so they don't span it) with rounded top corners; the active tab fills
+ * lighter and connects into the body; hovered tabs get a subtler fill. The ✕
+ * (per tab, on active/hover) and the + share a uniform square. */
 static void nw_paint_tabs(NoteWin* nw, HWND hwnd, HDC hdc) {
-    HFONT f = CreateFontW(-15,0,0,0,FW_SEMIBOLD,0,0,0,0,0,0,0,0,L"Segoe UI"); /* ~H3 */
-    HFONT old = (HFONT)SelectObject(hdc, f);
+    HFONT lf = CreateFontW(-14, 0,0,0, FW_SEMIBOLD, 0,0,0,0,0,0,0,0, L"Segoe UI");
+    HFONT gf = CreateFontW(-11, 0,0,0, FW_NORMAL,   0,0,0,0,0,0,0,0, L"Segoe UI"); /* glyphs */
+    HFONT old = (HFONT)SelectObject(hdc, lf);
     SetBkMode(hdc, TRANSPARENT);
+
     for (int i = 0; i < nw->ntabs; i++) {
         RECT r; nw_tab_rect(nw, hwnd, i, &r);
         int isact = (i == nw->active);
-        HBRUSH bg = CreateSolidBrush(isact ? COL_TOGGLE : COL_BG);
-        FillRect(hdc, &r, bg); DeleteObject(bg);
-        if (isact) {                                  /* accent top edge */
-            RECT top = { r.left, 0, r.right, 2 };
-            HBRUSH ac = CreateSolidBrush(RGB(0x6a,0x9a,0xff));
-            FillRect(hdc, &top, ac); DeleteObject(ac);
-        }
+        int ishot = (i == nw->hot_tab);
+        RECT shape = { r.left, TAB_TOP_GAP, r.right, TITLEBAR_H };
+        if (isact)      nw_fill_round_top(hdc, &shape, TAB_RADIUS, COL_TAB_ACT);
+        else if (ishot) nw_fill_round_top(hdc, &shape, TAB_RADIUS, COL_TAB_HOT);
+
         NoteMeta* m = nw_note_meta(nw, i);
         wchar_t wname[128];
         MultiByteToWideChar(CP_ACP, 0, m && m->name[0] ? m->name : "Untitled", -1, wname, 128);
-        RECT tr = { r.left + 8, r.top, r.right - TAB_CLOSE_W, r.bottom };
-        SetTextColor(hdc, COL_TEXT);
+        RECT tr = { r.left + 12, TAB_TOP_GAP, r.right - CTL_SIZE - 8, TITLEBAR_H };
+        SelectObject(hdc, lf);
+        SetTextColor(hdc, isact ? COL_TEXT : (ishot ? RGB(0xc9,0xc9,0xd0) : RGB(0x8a,0x8a,0x90)));
         DrawTextW(hdc, wname, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        RECT xr = { r.right - TAB_CLOSE_W, r.top, r.right, r.bottom };   /* close glyph */
-        SetTextColor(hdc, RGB(0xb0,0xb0,0xb8));
-        DrawTextW(hdc, L"\x2715", -1, &xr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        if (isact || ishot) {                         /* ✕ (uniform square) */
+            RECT xr; nw_close_rect(nw, hwnd, i, &xr);
+            int overx = (ishot && nw->hot_close);
+            if (overx) nw_fill_round(hdc, &xr, 4, RGB(0x3a,0x3a,0x40));
+            SelectObject(hdc, gf);
+            SetTextColor(hdc, overx ? RGB(0xff,0xff,0xff) : RGB(0xc0,0xc0,0xc8));
+            DrawTextW(hdc, L"\x2715", -1, &xr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
     }
-    RECT pr; nw_plus_rect(nw, hwnd, &pr);            /* + button */
-    SetTextColor(hdc, COL_TEXT);
-    DrawTextW(hdc, L"+", -1, &pr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(hdc, old); DeleteObject(f);
+
+    RECT pr; nw_plus_rect(nw, hwnd, &pr);             /* + (same square as ✕) */
+    if (nw->hot_plus) nw_fill_round(hdc, &pr, 4, COL_HOVER);
+    SelectObject(hdc, gf);
+    SetTextColor(hdc, nw->hot_plus ? RGB(0xff,0xff,0xff) : RGB(0x9a,0x9a,0xa2));
+    DrawTextW(hdc, L"\x002B", -1, &pr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    if (nw->rename_edit) {                             /* accent frame under the rename field */
+        RECT er; nw_rename_rect(nw, hwnd, &er);
+        RECT fr = { er.left - 2, er.top - 2, er.right + 2, er.bottom + 2 };
+        nw_fill_round(hdc, &fr, 5, COL_ACCENT);
+    }
+
+    SelectObject(hdc, old);
+    DeleteObject(lf); DeleteObject(gf);
 }
 
 static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1113,6 +1189,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         nw = (NoteWin*)cs->lpCreateParams;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)nw);
         nw->drag_tab = -1;   /* calloc zeros, but 0 is a valid tab index */
+        nw->hot_tab  = -1;
 
         /* Dark native title bar (best-effort; ignored on older Windows). */
         BOOL dark = TRUE;
@@ -1163,7 +1240,8 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 0, 0, 100, 100, hwnd, (HMENU)ID_EDIT, cs->hInstance, NULL);
             SendMessageW(nw->tab[i].edit, EM_SETBKGNDCOLOR, 0, (LPARAM)COL_BG);
             CHARFORMAT2W cf; memset(&cf, 0, sizeof cf);
-            cf.cbSize = sizeof cf; cf.dwMask = CFM_COLOR; cf.crTextColor = COL_TEXT;
+            cf.cbSize = sizeof cf; cf.dwMask = CFM_COLOR | CFM_FACE | CFM_SIZE;
+    cf.crTextColor = COL_TEXT; cf.yHeight = 200; wcscpy(cf.szFaceName, L"IBM Plex Mono");
             SendMessageW(nw->tab[i].edit, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
             SendMessageW(nw->tab[i].edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
             nw_load_tab(nw, i);
@@ -1239,6 +1317,15 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         mmi->ptMinTrackSize.y = 180;
         return 0;
     }
+    case WM_CTLCOLOREDIT:                 /* dark background for the rename field */
+        if (nw && (HWND)lp == nw->rename_edit) {
+            HDC dc = (HDC)wp;
+            SetTextColor(dc, COL_TEXT);
+            SetBkColor(dc, COL_RENAME);
+            if (!g_rename_brush) g_rename_brush = CreateSolidBrush(COL_RENAME);
+            return (LRESULT)g_rename_brush;
+        }
+        return DefWindowProcW(hwnd, msg, wp, lp);
     case WM_SETFOCUS:
         if (nw && nw_edit(nw)) SetFocus(nw_edit(nw));   /* keep focus on the editor */
         return 0;
@@ -1284,6 +1371,27 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
             }
             return 0;
+        }
+        if (nw) {                                     /* hover highlight (WT look) */
+            int idx = -1, ht = -1, hc = 0, hp = 0;
+            TabHit h = nw_tab_hit(nw, hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &idx);
+            if (h == HIT_TAB)        ht = idx;
+            else if (h == HIT_CLOSE) { ht = idx; hc = 1; }
+            else if (h == HIT_PLUS)  hp = 1;
+            if (ht != nw->hot_tab || hc != nw->hot_close || hp != nw->hot_plus) {
+                nw->hot_tab = ht; nw->hot_close = hc; nw->hot_plus = hp;
+                RECT bar; GetClientRect(hwnd, &bar); bar.bottom = TITLEBAR_H;
+                InvalidateRect(hwnd, &bar, TRUE);
+            }
+            TRACKMOUSEEVENT tme = { sizeof tme, TME_LEAVE, hwnd, 0 };
+            TrackMouseEvent(&tme);
+        }
+        return 0;
+    case WM_MOUSELEAVE:
+        if (nw && (nw->hot_tab != -1 || nw->hot_close || nw->hot_plus)) {
+            nw->hot_tab = -1; nw->hot_close = 0; nw->hot_plus = 0;
+            RECT bar; GetClientRect(hwnd, &bar); bar.bottom = TITLEBAR_H;
+            InvalidateRect(hwnd, &bar, TRUE);
         }
         return 0;
     case WM_LBUTTONUP:
