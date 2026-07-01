@@ -35,8 +35,10 @@ int gfx_global_init(void) {
     }
     if (!g_dw) {
         if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
-                                       &IID_IDWriteFactory, (IUnknown**)&g_dw)))
+                                       &IID_IDWriteFactory, (IUnknown**)&g_dw))) {
+            if (g_d2d) { ID2D1Factory_Release(g_d2d); g_d2d = NULL; }
             return 0;
+        }
     }
     return 1;
 }
@@ -122,7 +124,12 @@ GfxD2D* gfx_create(HWND hwnd, int dpi) {
         free(g); return NULL;
     }
     D2D1_COLOR_F black = { 0, 0, 0, 1 };
-    ID2D1RenderTarget_CreateSolidColorBrush((ID2D1RenderTarget*)g->rt, &black, NULL, &g->brush);
+    if (FAILED(ID2D1RenderTarget_CreateSolidColorBrush(
+            (ID2D1RenderTarget*)g->rt, &black, NULL, &g->brush)) || !g->brush) {
+        ID2D1HwndRenderTarget_Release(g->rt);
+        free(g);
+        return NULL;
+    }
     make_all_formats(g);
     return g;
 }
