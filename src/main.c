@@ -5,6 +5,20 @@
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show) {
     (void)hPrev; (void)cmd; (void)show;
+
+    /* Single instance. The first launch owns this named mutex and runs the app;
+     * a later launch finds the first instance's message-only owner window and
+     * posts the registered "new window" message to it, so a second click opens
+     * another window in the SAME process (shared tray + shared preferences.json)
+     * rather than spawning a duplicate process that would fight over the file. */
+    HANDLE inst_mutex = CreateMutexW(NULL, TRUE, L"quickNote_SingleInstance_Mutex");
+    if (inst_mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND owner = FindWindowExW(HWND_MESSAGE, NULL, TRAY_OWNER_CLASS, NULL);
+        if (owner) PostMessageW(owner, RegisterWindowMessageW(TRAY_NEWWIN_MSG), 0, 0);
+        if (inst_mutex) CloseHandle(inst_mutex);
+        return 0;                      /* hand off to the running instance and exit */
+    }
+
     AppState app;
     if (!app_init(&app, NULL)) return 1;
     note_window_register_class(hInst);
