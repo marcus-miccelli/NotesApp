@@ -972,16 +972,6 @@ static void nw_add_tab(NoteWin* nw, HWND hwnd) {
     SetFocus(nw->tab[i].edit);
 }
 
-/* Spawn a new note in a brand-new window (offset from this one).
- * Currently unused; repurposed for Alt+N in Task 11. */
-static void __attribute__((unused)) nw_new_note(NoteWin* nw) {
-    WinMeta* cur = nw_win(nw);       /* read coords BEFORE app_new_window (may realloc) */
-    int ox = 224, oy = 224;
-    if (cur) { ox = cur->x + 24; oy = cur->y + 24; }
-    WinMeta* w = app_new_window(nw->app);
-    if (w) { w->x = ox; w->y = oy; note_window_open(nw->app, w); }
-}
-
 /* Delete the active note (with confirmation), removing its .md and index entry.
  * Reuses nw_remove_tab so only the deleted tab is removed; if it was the last
  * tab the window closes.  No save — the note is being deleted. */
@@ -1055,7 +1045,9 @@ static void nw_commit_rename(NoteWin* nw, HWND hwnd, int accept) {
 /* Handle shortcuts forwarded from a RichEdit via EN_MSGFILTER. Returns nonzero
  * if the keystroke was consumed (so the control ignores it). Global shortcuts
  * (new/delete) work from either box; formatting shortcuts apply to the body
- * only and consume the key so RichEdit's built-in Ctrl+B/I don't also fire. */
+ * only and consume the key so RichEdit's built-in Ctrl+B/I don't also fire.
+ * (Alt+N — new window — is a system key that RichEdit does not forward via
+ * EN_MSGFILTER, so it is handled in the main message loop, not here.) */
 static LRESULT nw_handle_key(NoteWin* nw, HWND hwnd, const MSGFILTER* mf) {
     if (mf->msg != WM_KEYDOWN) return 0;
     BOOL ctrl  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;

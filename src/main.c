@@ -22,10 +22,21 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show) {
 
     /* Plain dispatch — no IsDialogMessage. The note window is not a dialog;
      * IsDialogMessage would treat Enter as a default-button press and swallow
-     * it before the multiline body could insert a newline. Shortcuts are
-     * handled via the RichEdit EN_MSGFILTER, not accelerators. */
+     * it before the multiline body could insert a newline. Most shortcuts are
+     * handled via the RichEdit EN_MSGFILTER, not accelerators.
+     *
+     * Alt+N (new window) is the exception: it is a system key (WM_SYSKEYDOWN)
+     * that RichEdit does not surface through EN_MSGFILTER, so intercept it here
+     * before dispatch. GetMessage delivers WM_SYSKEYDOWN whenever one of this
+     * app's windows has focus. Consuming it also avoids the menu-mode beep. */
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+        if (msg.message == WM_SYSKEYDOWN && msg.wParam == 'N' &&
+            (GetKeyState(VK_MENU) & 0x8000)) {
+            WinMeta* w = app_new_window(&app);
+            if (w) note_window_open(&app, w);
+            continue;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
