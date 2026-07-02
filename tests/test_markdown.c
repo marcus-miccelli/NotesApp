@@ -148,4 +148,28 @@ void test_markdown(void) {
         CHECK(n1 == 1 && n2 == 1);
         free(d);
     }
+
+    /* --- markdown_decorate: cursor-aware reveal --- */
+    {   /* two paragraphs; caret in the first reveals its markers only */
+        const char* t = "**a**\n**b**";   /* para1 [0,5], \n at 5, para2 [6,11] */
+        Deco* d = NULL;
+        size_t n = markdown_decorate(t, strlen(t), 1, 1, &d);  /* caret in para1 */
+        int hide_in_p1 = 0, hide_in_p2 = 0;
+        for (size_t i = 0; i < n; i++) if (d[i].kind == DECO_HIDE) {
+            if (d[i].start < 5) hide_in_p1 = 1;
+            if (d[i].start > 5) hide_in_p2 = 1;
+        }
+        CHECK(hide_in_p1 == 0);   /* revealed */
+        CHECK(hide_in_p2 == 1);   /* still hidden */
+        free(d);
+    }
+    {   /* hide-all sentinel still hides both */
+        const char* t = "**a**\n**b**";
+        Deco* d = NULL;
+        size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d);
+        int hides = 0;
+        for (size_t i = 0; i < n; i++) if (d[i].kind == DECO_HIDE) hides++;
+        CHECK(hides == 4);
+        free(d);
+    }
 }

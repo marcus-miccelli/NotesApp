@@ -99,7 +99,20 @@ typedef struct {
     int      listnum;      /* next ordinal for ordered lists */
     int      in_li;
     int      li_first_text;
+    /* reveal window */
+    size_t sel_lo, sel_hi;   /* reveal window; lo>hi = hide all */
 } DCtx;
+
+/* Does the source paragraph containing [start, start+len) intersect the reveal
+ * window [sel_lo, sel_hi]?  Paragraph = run between \n/\r boundaries. */
+static int in_reveal(DCtx* c, size_t start, size_t len) {
+    if (c->sel_lo > c->sel_hi) return 0;               /* hide-all sentinel */
+    size_t ps = start;
+    while (ps > 0 && c->base[ps-1] != '\n' && c->base[ps-1] != '\r') ps--;
+    size_t pe = start + len;
+    while (pe < c->len && c->base[pe] != '\n' && c->base[pe] != '\r') pe++;
+    return c->sel_lo <= pe && c->sel_hi >= ps;         /* ranges overlap */
+}
 
 static void push(DCtx* c, DecoKind k, size_t start, size_t len,
                  MdFmt fmt, ParaKind para, int number) {
@@ -113,6 +126,12 @@ static void push(DCtx* c, DecoKind k, size_t start, size_t len,
     Deco* d = &c->arr[c->count++];
     d->kind = k; d->start = start; d->len = len;
     d->fmt = fmt; d->para = para; d->number = number;
+}
+
+static void push_hide(DCtx* c, size_t start, size_t len) {
+    if (len == 0) return;
+    if (in_reveal(c, start, len)) return;   /* caret paragraph: show markers */
+    push(c, DECO_HIDE, start, len, 0, PARA_NONE, 0);
 }
 
 static MdFmt dh_fmt(unsigned level) {
@@ -174,7 +193,7 @@ static int d_leave_span(MD_SPANTYPE t, void* detail, void* ud) {
     int ml = c->sp[c->depth].marklen; if (ml < 0) ml = 0;
     size_t base = c->last_text_end > c->close_cursor ? c->last_text_end
                                                      : c->close_cursor;
-    if (ml > 0) push(c, DECO_HIDE, base, (size_t)ml, 0, PARA_NONE, 0);
+    if (ml > 0) push_hide(c, base, (size_t)ml);
     c->close_cursor = base + (size_t)ml;
     return 0;
 }
@@ -194,7 +213,7 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
         }
         if ((size_t)ml > cursor) ml = (int)cursor;   /* clamp: never underflow */
         if (ml > 0)
-            push(c, DECO_HIDE, cursor - (size_t)ml, (size_t)ml, 0, PARA_NONE, 0);
+            push_hide(c, cursor - (size_t)ml, (size_t)ml);
         cursor -= (size_t)ml;
         c->sp[i].start_set = 1;
     }
@@ -203,7 +222,7 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
         c->li_first_text = 1;
         size_t ls = off;
         while (ls > 0 && c->base[ls-1] != '\n' && c->base[ls-1] != '\r') ls--;
-        push(c, DECO_HIDE, ls, off - ls, 0, PARA_NONE, 0);           /* "- "/"N. " */
+        push_hide(c, ls, off - ls);           /* "- "/"N. " */
         push(c, DECO_PARA, ls, (off - ls) + (size_t)size,
              0, c->listkind,
              c->listkind == PARA_NUMBER ? c->listnum : 0);
@@ -216,7 +235,7 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
             c->h_first_text = 1;
             size_t ls = off;
             while (ls > 0 && c->base[ls-1] != '\n' && c->base[ls-1] != '\r') ls--;
-            push(c, DECO_HIDE, ls, off - ls, 0, PARA_NONE, 0);
+            push_hide(c, ls, off - ls);
         }
         f |= c->h_fmt;
     }
@@ -227,9 +246,10 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
 
 size_t markdown_decorate(const char* text, size_t len,
                          size_t sel_lo, size_t sel_hi, Deco** out) {
-    (void)sel_lo; (void)sel_hi;   /* reveal wired in a later task */
+    /* (reveal handled via c.sel_lo/c.sel_hi below) */
     DCtx c; memset(&c, 0, sizeof c);
     c.base = text; c.len = len;
+    c.sel_lo = sel_lo; c.sel_hi = sel_hi;
     MD_PARSER p; memset(&p, 0, sizeof p);
     p.abi_version = 0;
     p.flags = MD_DIALECT_COMMONMARK | MD_FLAG_STRIKETHROUGH;
