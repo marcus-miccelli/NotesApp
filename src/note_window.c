@@ -1,7 +1,11 @@
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00  /* Windows 10 — needed for GetDpiForWindow */
+#endif
 #include "note_window.h"
 #include "store.h"
 #include "markdown.h"
 #include "resource.h"
+#include "gfx_d2d.h"
 #include <richedit.h>
 #include <windowsx.h>
 #include <commctrl.h>
@@ -74,7 +78,6 @@ typedef enum { HIT_NONE, HIT_TAB, HIT_CLOSE, HIT_PLUS } TabHit;
 static const COLORREF COL_BG      = RGB(0x0C, 0x0C, 0x0C);  /* app background */
 static const COLORREF COL_TEXT    = RGB(0xe6, 0xe6, 0xe6);
 static const COLORREF COL_BORDER  = RGB(0x2a, 0x2a, 0x2e);  /* dividers */
-static const COLORREF COL_TOGGLE  = RGB(0x3a, 0x3a, 0x46);  /* sidebar button active/pressed */
 static const COLORREF COL_CLOSE   = RGB(0xc0, 0x3a, 0x3a);  /* close button hover */
 static const COLORREF COL_HOVER   = RGB(0x26, 0x26, 0x2b);  /* min/max + control hover */
 static const COLORREF COL_TAB_ACT = RGB(0x1b, 0x1b, 0x1f);  /* active tab fill */
@@ -94,7 +97,6 @@ typedef struct {
     int   ntabs;
     int   active;
     HWND  btns[NUM_BTNS];
-    HWND  wbtns[NUM_WBTNS];
     int   whot[NUM_WBTNS];
     int   active_fmt[NUM_BTNS];
     /* tab hover state (WT look) */
@@ -110,6 +112,7 @@ typedef struct {
     HWND  rename_edit;  /* NULL when no rename in progress */
     HFONT rename_font;  /* font for the rename edit; freed on commit */
     int   rename_tab;   /* index of the tab being renamed */
+    GfxD2D* gfx;        /* Direct2D chrome renderer; lazy-created in WM_PAINT */
 } NoteWin;
 
 static HMODULE g_richedit = NULL;
@@ -120,25 +123,51 @@ static HICON   g_app_icon = NULL;     /* qN, painted in the top-left cell */
 
 static NoteWin* nw_get(HWND h) { return (NoteWin*)GetWindowLongPtrW(h, GWLP_USERDATA); }
 
+/* Window DPI (PerMonitorV2). GetDpiForWindow needs Win10 1607+; 96 is the
+ * safe fallback. All chrome constants are authored at 96 dpi and scaled here. */
+static int nw_dpi(HWND h) { UINT d = GetDpiForWindow(h); return d ? (int)d : 96; }
+static int nw_s(HWND h, int v) { return MulDiv(v, nw_dpi(h), 96); }
+
+/* Body char height in twips, scaled to the window DPI (10pt base = 200 twips). */
+static LONG nw_body_yheight(HWND hwnd) { return (LONG)nw_s(hwnd, 200); }
+
 static int nw_top_gutter(HWND hwnd) {
-    return IsZoomed(hwnd) ? 0 : TOP_FRAME_H;
+    return IsZoomed(hwnd) ? 0 : nw_s(hwnd, TOP_FRAME_H);
 }
 
 static int nw_titlebar_h(HWND hwnd) {
-    return nw_top_gutter(hwnd) + TITLE_CONTENT_H;
+    return nw_top_gutter(hwnd) + nw_s(hwnd, TITLE_CONTENT_H);
 }
 
 static int nw_tab_top(HWND hwnd) {
-    return nw_top_gutter(hwnd) + TAB_TOP_GAP;
+    return nw_top_gutter(hwnd) + nw_s(hwnd, TAB_TOP_GAP);
 }
 
-static int nw_window_buttons_width(void) {
-    return NUM_WBTNS * WINBTN_W;
+static int nw_window_buttons_width(HWND hwnd) {
+    return NUM_WBTNS * nw_s(hwnd, WINBTN_W);
 }
 
 static int nw_window_buttons_left(HWND hwnd) {
     RECT rc; GetClientRect(hwnd, &rc);
-    return rc.right - nw_window_buttons_width();
+    return rc.right - nw_window_buttons_width(hwnd);
+}
+
+/* Rect of window button i (0=min, 1=max, 2=close), right-aligned in the
+ * titlebar, each WINBTN_W wide and the full titlebar tall. */
+static void nw_wbtn_rect(HWND hwnd, int i, RECT* r) {
+    RECT rc; GetClientRect(hwnd, &rc);
+    int w = nw_s(hwnd, WINBTN_W);
+    int right = rc.right - (NUM_WBTNS - 1 - i) * w;
+    SetRect(r, right - w, 0, right, nw_titlebar_h(hwnd));
+}
+
+/* Window button under (cx,cy) in client coords, or -1. */
+static int nw_wbtn_hit(HWND hwnd, int cx, int cy) {
+    for (int i = 0; i < NUM_WBTNS; i++) {
+        RECT r; nw_wbtn_rect(hwnd, i, &r);
+        if (cx >= r.left && cx < r.right && cy >= r.top && cy < r.bottom) return i;
+    }
+    return -1;
 }
 
 /* Resolve the WinMeta* / active tab fresh at point of use. prefs arrays can be
@@ -196,99 +225,76 @@ static void nw_regions(HWND hwnd, RECT* title, RECT* body, int* vx, int* hy) {
     RECT rc;
     GetClientRect(hwnd, &rc);
 
-    int v  = SIDEBAR_W;
+    int v  = nw_s(hwnd, SIDEBAR_W);
     int h  = nw_titlebar_h(hwnd);
-    int cl = v + REGION_GAP;
+    int cl = v + nw_s(hwnd, REGION_GAP);
 
-    /* Custom caption buttons live on the right. Tabs stop before them. */
     int btns_l = nw_window_buttons_left(hwnd);
-    int t_r = btns_l - REGION_GAP;
+    int t_r = btns_l - nw_s(hwnd, REGION_GAP);
     if (t_r < cl) t_r = cl;
 
-    int cr = rc.right - PAD_OUTER;
+    int cr = rc.right - nw_s(hwnd, PAD_OUTER);
     if (cr < cl) cr = cl;
 
-    int b_top = h + REGION_GAP;
-    int b_bot = rc.bottom - PAD_OUTER;
+    int b_top = h + nw_s(hwnd, REGION_GAP);
+    int b_bot = rc.bottom - nw_s(hwnd, PAD_OUTER);
     if (b_bot < b_top) b_bot = b_top;
 
-    if (title) SetRect(title, cl, 4, t_r, h - 4);
+    if (title) SetRect(title, cl, nw_s(hwnd, 4), t_r, h - nw_s(hwnd, 4));
     if (body)  SetRect(body,  cl, b_top, cr, b_bot);
     if (vx) *vx = v;
     if (hy) *hy = h;
 }
 
 /* Tab strip geometry helpers — shared by paint (Task 6) and hit-test (Task 7). */
-static int nw_strip_left(void)  { return SIDEBAR_W + 1; }
+static int nw_strip_left(HWND hwnd)  { return nw_s(hwnd, SIDEBAR_W) + 1; }
 static int nw_strip_right(HWND hwnd) {
     int btns_l = nw_window_buttons_left(hwnd);
-    return btns_l - DRAG_GAP;
+    return btns_l - nw_s(hwnd, DRAG_GAP);
 }
 static int nw_tab_w(NoteWin* nw, HWND hwnd) {
-    int plus_visible = TITLE_CONTENT_H - TAB_TOP_GAP - 1;
-    int avail = nw_strip_right(hwnd) - nw_strip_left() - plus_visible;
+    int plus_visible = nw_s(hwnd, TITLE_CONTENT_H) - nw_s(hwnd, TAB_TOP_GAP) - 1;
+    int avail = nw_strip_right(hwnd) - nw_strip_left(hwnd) - plus_visible;
     int n = nw->ntabs > 0 ? nw->ntabs : 1;
     int w = avail / n;
-    if (w > TAB_MAX) w = TAB_MAX;
-    if (w < TAB_MIN) w = TAB_MIN;
+    if (w > nw_s(hwnd, TAB_MAX)) w = nw_s(hwnd, TAB_MAX);
+    if (w < nw_s(hwnd, TAB_MIN)) w = nw_s(hwnd, TAB_MIN);
     return w;
 }
-/* Full-height hit rect for tab i (easier click target than the drawn shape). */
 static void nw_tab_rect(NoteWin* nw, HWND hwnd, int i, RECT* r) {
     int w = nw_tab_w(nw, hwnd);
-    int l = nw_strip_left() + i * w;
+    int l = nw_strip_left(hwnd) + i * w;
     int top = nw_top_gutter(hwnd);
-
-    SetRect(r, l, top, l + w, top + TITLE_CONTENT_H);
+    SetRect(r, l, top, l + w, top + nw_s(hwnd, TITLE_CONTENT_H));
 }
-
-/* The uniform ✕ square inside tab i, right-aligned with a small pad. */
 static void nw_close_rect(NoteWin* nw, HWND hwnd, int i, RECT* r) {
     RECT t;
     nw_tab_rect(nw, hwnd, i, &t);
-
-    int top = t.top + TAB_TOP_GAP;
+    int top = t.top + nw_s(hwnd, TAB_TOP_GAP);
     int bottom = t.bottom;
-
-    SetRect(
-        r,
-        t.right - TAB_CLOSE_W,
-        top,
-        t.right,
-        bottom
-    );
+    SetRect(r, t.right - nw_s(hwnd, TAB_CLOSE_W), top, t.right, bottom);
 }
-/* The uniform + square, PLUS_GAP after the last tab, aligned with the ✕. */
 static void nw_plus_rect(NoteWin* nw, HWND hwnd, RECT* r) {
     int w = nw_tab_w(nw, hwnd);
-
     int tab_top = nw_top_gutter(hwnd);
-    int top = tab_top + TAB_TOP_GAP;
-    int bottom = tab_top + TITLE_CONTENT_H;
-
+    int top = tab_top + nw_s(hwnd, TAB_TOP_GAP);
+    int bottom = tab_top + nw_s(hwnd, TITLE_CONTENT_H);
     int visible_size = bottom - top;
-    int visible_left = nw_strip_left() + nw->ntabs * w;
-
-    /* The hidden overlap tucks under the previous tab. The visible portion is square. */
-    SetRect(
-        r,
-        visible_left - PLUS_OVERLAP,
-        top,
-        visible_left + visible_size,
-        bottom
-    );
+    int visible_left = nw_strip_left(hwnd) + nw->ntabs * w;
+    SetRect(r, visible_left - nw_s(hwnd, PLUS_OVERLAP), top,
+            visible_left + visible_size, bottom);
 }
 
 static TabHit nw_tab_hit(NoteWin* nw, HWND hwnd, int cx, int cy, int* out_idx) {
     int tab_top = nw_top_gutter(hwnd);
-    int tab_bottom = tab_top + TITLE_CONTENT_H;
+    int tab_bottom = tab_top + nw_s(hwnd, TITLE_CONTENT_H);
 
     if (cy < tab_top || cy >= tab_bottom) return HIT_NONE;
     for (int i = 0; i < nw->ntabs; i++) {
         RECT r; nw_tab_rect(nw, hwnd, i, &r);
         if (cx >= r.left && cx < r.right) {
             if (out_idx) *out_idx = i;
-            if (cx >= r.right - CTL_SIZE - 8) return HIT_CLOSE;
+            if (cx >= r.right - nw_s(hwnd, CTL_SIZE) - nw_s(hwnd, 8)) return HIT_CLOSE;
             return HIT_TAB;
         }
     }
@@ -308,37 +314,14 @@ static void nw_layout(HWND hwnd, NoteWin* nw) {
     nw_regions(hwnd, NULL, &bd, &vx, &hy);
 
     int side = vx;
+    int gap  = nw_s(hwnd, BTN_GAP);
     for (int i = 0; i < NUM_BTNS; i++) {
-        MoveWindow(
-            nw->btns[i],
-            0,
-            hy + 1 + i * (side + BTN_GAP),
-            side,
-            side,
-            TRUE
-        );
-    }
-
-    for (int i = 0; i < NUM_WBTNS; i++) {
-        MoveWindow(
-            nw->wbtns[i],
-            rc.right - (NUM_WBTNS - i) * WINBTN_W,
-            0,
-            WINBTN_W,
-            nw_titlebar_h(hwnd),
-            TRUE
-        );
+        MoveWindow(nw->btns[i], 0, hy + 1 + i * (side + gap), side, side, TRUE);
     }
 
     for (int i = 0; i < nw->ntabs; i++) {
-        MoveWindow(
-            nw->tab[i].edit,
-            bd.left,
-            bd.top,
-            bd.right - bd.left,
-            bd.bottom - bd.top,
-            TRUE
-        );
+        MoveWindow(nw->tab[i].edit, bd.left, bd.top,
+                   bd.right - bd.left, bd.bottom - bd.top, TRUE);
     }
 }
 
@@ -355,7 +338,7 @@ static void nw_draw_button(NoteWin* nw, const DRAWITEMSTRUCT* d) {
     DeleteObject(bg);
 
     LOGFONTW lf; memset(&lf, 0, sizeof lf);
-    lf.lfHeight = -16; lf.lfWeight = FW_BOLD; wcscpy(lf.lfFaceName, L"IBM Plex Mono");
+    lf.lfHeight = -nw_s(d->hwndItem, 16); lf.lfWeight = FW_BOLD; wcscpy(lf.lfFaceName, L"IBM Plex Mono");
     if (d->CtlID == IDB_ITALIC) lf.lfItalic = TRUE;
     if (d->CtlID == IDB_STRIKE) lf.lfStrikeOut = TRUE;
     HFONT f = CreateFontIndirectW(&lf);
@@ -369,58 +352,6 @@ static void nw_draw_button(NoteWin* nw, const DRAWITEMSTRUCT* d) {
 
     SelectObject(d->hDC, old);
     DeleteObject(f);
-}
-
-/* Owner-draw a window caption button (min/max/close) like the native ones:
- * transparent until hovered/pressed (close goes red), with a Segoe MDL2 Assets
- * glyph. The maximize button shows the restore glyph while the window is zoomed. */
-static void nw_draw_wbutton(NoteWin* nw, HWND parent, const DRAWITEMSTRUCT* d) {
-    int idx = (int)d->CtlID - IDW_MIN;
-    int hot = (idx >= 0 && idx < NUM_WBTNS && nw->whot[idx]);
-    int pressed = (d->itemState & ODS_SELECTED) != 0;
-
-    COLORREF fill = COL_BG;
-    if (d->CtlID == IDW_CLOSE) { if (hot || pressed) fill = COL_CLOSE; }
-    else if (pressed)          fill = COL_TOGGLE;
-    else if (hot)              fill = COL_HOVER;
-    HBRUSH bg = CreateSolidBrush(fill);
-    FillRect(d->hDC, &d->rcItem, bg);
-    DeleteObject(bg);
-
-    const wchar_t* glyph = L"\xE921";                      /* min */
-    if (d->CtlID == IDW_MAX)   glyph = IsZoomed(parent) ? L"\xE923" : L"\xE922"; /* restore/max */
-    if (d->CtlID == IDW_CLOSE) glyph = L"\xE8BB";          /* close */
-
-    LOGFONTW lf; memset(&lf, 0, sizeof lf);
-    lf.lfHeight = -10; lf.lfWeight = FW_NORMAL; wcscpy(lf.lfFaceName, L"Segoe MDL2 Assets");
-    HFONT f = CreateFontIndirectW(&lf);
-    HFONT old = (HFONT)SelectObject(d->hDC, f);
-    SetBkMode(d->hDC, TRANSPARENT);
-    SetTextColor(d->hDC, RGB(0xe6,0xe6,0xe6));
-    RECT r = d->rcItem;
-    DrawTextW(d->hDC, glyph, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(d->hDC, old);
-    DeleteObject(f);
-}
-
-/* Subclass for caption buttons: track hover so the button highlights like the
- * native ones (BS_OWNERDRAW alone gives no hot state). */
-static LRESULT CALLBACK nw_wbtn_sub(HWND h, UINT msg, WPARAM wp, LPARAM lp,
-                                    UINT_PTR id, DWORD_PTR ref) {
-    NoteWin* nw = (NoteWin*)ref;
-    (void)wp; (void)lp;
-    if (msg == WM_MOUSEMOVE) {
-        if (!nw->whot[id]) {
-            nw->whot[id] = 1;
-            TRACKMOUSEEVENT tme = { sizeof tme, TME_LEAVE, h, 0 };
-            TrackMouseEvent(&tme);
-            InvalidateRect(h, NULL, TRUE);
-        }
-    } else if (msg == WM_MOUSELEAVE) {
-        nw->whot[id] = 0;
-        InvalidateRect(h, NULL, TRUE);
-    }
-    return DefSubclassProc(h, msg, wp, lp);
 }
 
 /* Read the body as RichEdit-indexed text (\r breaks, CP_ACP); caller frees.
@@ -1077,7 +1008,7 @@ static void nw_add_tab(NoteWin* nw, HWND hwnd) {
     SendMessageW(nw->tab[i].edit, EM_SETBKGNDCOLOR, 0, (LPARAM)COL_BG);
     CHARFORMAT2W cf; memset(&cf, 0, sizeof cf);
     cf.cbSize = sizeof cf; cf.dwMask = CFM_COLOR | CFM_FACE | CFM_SIZE;
-    cf.crTextColor = COL_TEXT; cf.yHeight = 200; wcscpy(cf.szFaceName, L"IBM Plex Mono");
+    cf.crTextColor = COL_TEXT; cf.yHeight = nw_body_yheight(hwnd); wcscpy(cf.szFaceName, L"IBM Plex Mono");
     SendMessageW(nw->tab[i].edit, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
     SendMessageW(nw->tab[i].edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
     nw_load_tab(nw, i);
@@ -1130,9 +1061,9 @@ static LRESULT CALLBACK nw_rename_sub(HWND h, UINT msg, WPARAM wp, LPARAM lp,
 static void nw_rename_rect(NoteWin* nw, HWND hwnd, RECT* r) {
     RECT t; nw_tab_rect(nw, hwnd, nw->rename_tab, &t);
     int tab_top = nw_tab_top(hwnd);
-    int ex = t.left + 8, ey = tab_top + 3;
-    int ew = (t.right - t.left) - 16; if (ew < 40) ew = 40;
-    int eh = nw_titlebar_h(hwnd) - tab_top - 6;
+    int ex = t.left + nw_s(hwnd, 8), ey = tab_top + nw_s(hwnd, 3);
+    int ew = (t.right - t.left) - nw_s(hwnd, 16); if (ew < nw_s(hwnd, 40)) ew = nw_s(hwnd, 40);
+    int eh = nw_titlebar_h(hwnd) - tab_top - nw_s(hwnd, 6);
     SetRect(r, ex, ey, ex + ew, ey + eh);
 }
 
@@ -1146,7 +1077,7 @@ static void nw_begin_rename(NoteWin* nw, HWND hwnd) {
         WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,     /* no border — we draw an accent frame */
         er.left, er.top, er.right - er.left, er.bottom - er.top,
         hwnd, (HMENU)ID_RENAME, GetModuleHandleW(NULL), NULL);
-    nw->rename_font = CreateFontW(-14,0,0,0,FW_SEMIBOLD,0,0,0,0,0,0,0,0,L"IBM Plex Mono");
+    nw->rename_font = CreateFontW(-nw_s(hwnd,14),0,0,0,FW_SEMIBOLD,0,0,0,0,0,0,0,0,L"IBM Plex Mono");
     SendMessageW(nw->rename_edit, WM_SETFONT, (WPARAM)nw->rename_font, TRUE);
     SetWindowTextA(nw->rename_edit, m && m->name[0] ? m->name : "");
     SendMessageW(nw->rename_edit, EM_SETSEL, 0, -1);
@@ -1200,151 +1131,92 @@ static LRESULT nw_handle_key(NoteWin* nw, HWND hwnd, const MSGFILTER* mf) {
     return 0;
 }
 
-/* Fill a rounded rectangle (all corners) — used for the ✕ / + hover squares. */
-static void nw_fill_round(HDC hdc, const RECT* rc, int radius, COLORREF col) {
-    HBRUSH b = CreateSolidBrush(col);
-    HRGN rgn = CreateRoundRectRgn(rc->left, rc->top, rc->right + 1, rc->bottom + 1,
-                                  radius * 2, radius * 2);
-    FillRgn(hdc, rgn, b);
-    DeleteObject(rgn); DeleteObject(b);
-}
+/* Draw the tab strip with Direct2D: + button fill behind, tab fills back-to-
+ * front (top corners rounded, antialiased), then labels, ✕ glyphs, and the +
+ * glyph. Colors come from the existing palette. */
+static void nw_paint_tabs(NoteWin* nw, HWND hwnd) {
+    GfxD2D* g = nw->gfx;
+    int radius = nw_s(hwnd, TAB_RADIUS);
 
-/* Fill a tab shape: only the top-RIGHT corner is rounded; the top-left and the
- * bottom are square. This keeps each tab's left edge flush — the first tab sits
- * flush to the vertical divider, and a succeeding tab's square top-left butts
- * against (protrudes past) the previous tab's rounded top-right rather than
- * curving inward. Built from the rounded-top region with the top-left notch
- * squared back in. */
-static void nw_fill_round_top(HDC hdc, const RECT* rc, int radius, COLORREF col) {
-    HBRUSH b = CreateSolidBrush(col);
-    HRGN round = CreateRoundRectRgn(rc->left, rc->top, rc->right + 1,
-                                    rc->bottom + radius * 2, radius * 2, radius * 2);
-    HRGN clip  = CreateRectRgn(rc->left, rc->top, rc->right + 1, rc->bottom + 1);
-    CombineRgn(round, round, clip, RGN_AND);                 /* rounded top-left + top-right */
-    HRGN tl = CreateRectRgn(rc->left, rc->top, rc->left + radius + 1, rc->top + radius + 1);
-    CombineRgn(round, round, tl, RGN_OR);                    /* square the top-left back off */
-    FillRgn(hdc, round, b);
-    DeleteObject(round); DeleteObject(clip); DeleteObject(tl); DeleteObject(b);
-}
+    RECT pr; nw_plus_rect(nw, hwnd, &pr);
+    if (nw->hot_plus) gfx_fill_tab(g, pr, radius, COL_HOVER);
 
-/* Draw the Windows-Terminal-style tab strip: tabs nested in the bar (a gap
- * above so they don't span it) with rounded top corners; the active tab fills
- * lighter and connects into the body; hovered tabs get a subtler fill. The ✕
- * (per tab, on active/hover) and the + share a uniform square. */
-static void nw_paint_tabs(NoteWin* nw, HWND hwnd, HDC hdc) {
-    HFONT lf = CreateFontW(-14, 0,0,0, FW_SEMIBOLD, 0,0,0,0,0,0,0,0, L"Segoe UI");
-    HFONT gf = CreateFontW(-11, 0,0,0, FW_NORMAL,   0,0,0,0,0,0,0,0, L"Segoe UI");
-    HFONT pf = CreateFontW(-15, 0,0,0, FW_NORMAL,   0,0,0,0,0,0,0,0, L"Segoe UI");
-    HFONT old = (HFONT)SelectObject(hdc, lf);
-
-    SetBkMode(hdc, TRANSPARENT);
-
-    const int plus_overlap = TAB_RADIUS;
-
-    /* Paint the + button fill first, behind the tabs. Its left overlap tucks
-     * underneath the final tab, so the visible part behaves like a square. */
-    RECT pr;
-    nw_plus_rect(nw, hwnd, &pr);
-
-    if (nw->hot_plus) {
-        nw_fill_round_top(hdc, &pr, TAB_RADIUS, COL_HOVER);
-    }
-
-    /* Paint every tab fill back-to-front. Inactive tabs still need a real
-     * shape so neighbour rounded-corner notches are filled consistently. */
     for (int i = nw->ntabs - 1; i >= 0; i--) {
-        RECT r;
-        nw_tab_rect(nw, hwnd, i, &r);
-
+        RECT r; nw_tab_rect(nw, hwnd, i, &r);
         int isact = (i == nw->active);
         int ishot = (i == nw->hot_tab);
 
         int fill_left = r.left;
-        if (i > 0) fill_left -= TAB_RADIUS;
+        if (i > 0) fill_left -= radius;
+        RECT shape = { fill_left, r.top + nw_s(hwnd, TAB_TOP_GAP), r.right, r.bottom - 1 };
 
-        RECT shape = {
-            fill_left,
-            r.top + TAB_TOP_GAP,
-            r.right,
-            r.bottom - 1
-        };
-
-        COLORREF fill = COL_BG;
+        unsigned fill = COL_BG;
         if (isact)      fill = COL_TAB_ACT;
         else if (ishot) fill = COL_TAB_HOT;
-
-        nw_fill_round_top(hdc, &shape, TAB_RADIUS, fill);
+        gfx_fill_tab(g, shape, radius, fill);
     }
 
-    /* Paint labels and close buttons after fills so overlap never covers text. */
     for (int i = 0; i < nw->ntabs; i++) {
-        RECT r;
-        nw_tab_rect(nw, hwnd, i, &r);
-
+        RECT r; nw_tab_rect(nw, hwnd, i, &r);
         int isact = (i == nw->active);
         int ishot = (i == nw->hot_tab);
 
         NoteMeta* m = nw_note_meta(nw, i);
         wchar_t wname[128];
-        MultiByteToWideChar(CP_ACP, 0,
-            m && m->name[0] ? m->name : "Untitled",
-            -1, wname, 128);
+        MultiByteToWideChar(CP_ACP, 0, m && m->name[0] ? m->name : "Untitled", -1, wname, 128);
 
-        RECT tr = {
-            r.left + 12,
-            r.top + TAB_TOP_GAP,
-            r.right - TAB_CLOSE_W - 4,
-            r.bottom - 1
-        };
+        RECT tr = { r.left + nw_s(hwnd, 12), r.top + nw_s(hwnd, TAB_TOP_GAP),
+                    r.right - nw_s(hwnd, TAB_CLOSE_W) - nw_s(hwnd, 4), r.bottom - 1 };
+        unsigned lc = isact ? COL_TEXT
+                    : (ishot ? RGB(0xc9,0xc9,0xd0) : RGB(0x8a,0x8a,0x90));
+        gfx_text(g, wname, tr, GFX_FMT_LABEL, lc);
 
-        SelectObject(hdc, lf);
-        SetTextColor(hdc,
-            isact ? COL_TEXT :
-            (ishot ? RGB(0xc9,0xc9,0xd0) : RGB(0x8a,0x8a,0x90)));
-        DrawTextW(hdc, wname, -1, &tr,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-        RECT xr;
-        nw_close_rect(nw, hwnd, i, &xr);
-
+        RECT xr; nw_close_rect(nw, hwnd, i, &xr);
         int overx = (ishot && nw->hot_close);
-        if (overx) {
-           nw_fill_round_top(hdc, &xr, TAB_RADIUS, RGB(0x3a,0x3a,0x40));
-        }
-
-        SelectObject(hdc, gf);
-        SetTextColor(hdc, overx ? RGB(0xff,0xff,0xff) : RGB(0xc0,0xc0,0xc8));
-        DrawTextW(hdc, L"\x2715", -1, &xr,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        if (overx) gfx_fill_tab(g, xr, radius, RGB(0x3a,0x3a,0x40));
+        gfx_text(g, L"\x2715", xr, GFX_FMT_CLOSE, overx ? RGB(0xff,0xff,0xff) : RGB(0xc0,0xc0,0xc8));
     }
 
-    /* Draw only inside the visible square part of the + button. */
-    RECT pg = pr;
-    pg.left += plus_overlap;
-
-    SelectObject(hdc, pf);
-    SetTextColor(hdc, nw->hot_plus ? RGB(0xff,0xff,0xff) : RGB(0x9a,0x9a,0xa2));
-    DrawTextW(hdc, L"\x002B", -1, &pg,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    RECT pg = pr; pg.left += radius;
+    gfx_text(g, L"\x002B", pg, GFX_FMT_PLUS, nw->hot_plus ? RGB(0xff,0xff,0xff) : RGB(0x9a,0x9a,0xa2));
 
     if (nw->rename_edit) {
-        RECT er;
-        nw_rename_rect(nw, hwnd, &er);
+        RECT er; nw_rename_rect(nw, hwnd, &er);
+        RECT fr = { er.left - 2, er.top - 2, er.right + 2, er.bottom + 2 };
+        gfx_fill_round(g, fr, nw_s(hwnd, 5), COL_ACCENT);
+    }
+}
 
-        RECT fr = {
-            er.left - 2,
-            er.top - 2,
-            er.right + 2,
-            er.bottom + 2
-        };
+/* Full chrome paint (inside gfx_begin/gfx_end): dividers, the qN wordmark in
+ * the top-left cell, and the tab strip. Window min/max/close buttons are still
+ * child controls in this task (painted by WM_DRAWITEM). */
+static void nw_paint_chrome(NoteWin* nw, HWND hwnd) {
+    RECT rc; GetClientRect(hwnd, &rc);
+    int vx, hy; nw_regions(hwnd, NULL, NULL, &vx, &hy);
 
-        nw_fill_round(hdc, &fr, 5, COL_ACCENT);
+    RECT vline = { vx, 0, vx + 1, rc.bottom };
+    RECT hline = { 0, hy, rc.right, hy + 1 };
+    gfx_fill_rect(nw->gfx, vline, COL_BORDER);
+    gfx_fill_rect(nw->gfx, hline, COL_BORDER);
+
+    RECT mark = { 0, 0, vx, hy };
+    gfx_text(nw->gfx, L"qN", mark, GFX_FMT_MARK, COL_TEXT);
+
+    for (int i = 0; i < NUM_WBTNS; i++) {
+        RECT wr; nw_wbtn_rect(hwnd, i, &wr);
+        int is_close = (i == 2);
+        unsigned fill = COL_BG;
+        if (is_close) { if (nw->whot[i]) fill = COL_CLOSE; }
+        else if (nw->whot[i]) fill = COL_HOVER;
+        if (fill != COL_BG) gfx_fill_rect(nw->gfx, wr, fill);
+
+        const wchar_t* glyph = L"\xE921";                 /* min */
+        if (i == 1) glyph = IsZoomed(hwnd) ? L"\xE923" : L"\xE922";  /* restore/max */
+        if (i == 2) glyph = L"\xE8BB";                    /* close */
+        gfx_text(nw->gfx, glyph, wr, GFX_FMT_WGLYPH, COL_TEXT);
     }
 
-    SelectObject(hdc, old);
-    DeleteObject(lf);
-    DeleteObject(gf);
-    DeleteObject(pf);
+    nw_paint_tabs(nw, hwnd);
 }
 
 static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1373,19 +1245,6 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 (HMENU)(INT_PTR)btndefs[i].id, cs->hInstance, NULL);
         }
 
-        /* Window-chrome buttons: minimize, maximize, close. They are custom
-         * because the client owns the caption area for the Terminal-style tabs. */
-        static const struct { int id; const wchar_t* glyph; } wbtndefs[NUM_WBTNS] = {
-            { IDW_MIN, L"\x2013" }, { IDW_MAX, L"\x25A1" }, { IDW_CLOSE, L"\x2715" },
-        };
-        for (int i = 0; i < NUM_WBTNS; i++) {
-            nw->wbtns[i] = CreateWindowExW(0, L"BUTTON", wbtndefs[i].glyph,
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                0, 0, WINBTN_W, TITLE_CONTENT_H, hwnd,
-                (HMENU)(INT_PTR)wbtndefs[i].id, cs->hInstance, NULL);
-            SetWindowSubclass(nw->wbtns[i], nw_wbtn_sub, (UINT_PTR)i, (DWORD_PTR)nw);
-        }
-
         /* Custom frame: extend the client over the caption (so we draw the title
          * bar) while keeping the real resize frame + shadow. */
         MARGINS m = { 0, 0, 1, 0 };
@@ -1408,7 +1267,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SendMessageW(nw->tab[i].edit, EM_SETBKGNDCOLOR, 0, (LPARAM)COL_BG);
             CHARFORMAT2W cf; memset(&cf, 0, sizeof cf);
             cf.cbSize = sizeof cf; cf.dwMask = CFM_COLOR | CFM_FACE | CFM_SIZE;
-    cf.crTextColor = COL_TEXT; cf.yHeight = 200; wcscpy(cf.szFaceName, L"IBM Plex Mono");
+    cf.crTextColor = COL_TEXT; cf.yHeight = nw_body_yheight(hwnd); wcscpy(cf.szFaceName, L"IBM Plex Mono");
             SendMessageW(nw->tab[i].edit, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
             SendMessageW(nw->tab[i].edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
             nw_load_tab(nw, i);
@@ -1421,28 +1280,47 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_SIZE:
         if (nw) {
+            if (nw->gfx) {
+                RECT rc; GetClientRect(hwnd, &rc);
+                gfx_resize(nw->gfx, rc.right - rc.left, rc.bottom - rc.top);
+            }
             nw_layout(hwnd, nw);
             InvalidateRect(hwnd, NULL, TRUE);
-            if (nw->wbtns[1]) InvalidateRect(nw->wbtns[1], NULL, TRUE);   /* max<->restore glyph */
+        }
+        return 0;
+    case WM_DPICHANGED:
+        if (nw) {
+            RECT* sug = (RECT*)lp;             /* OS-suggested position + size */
+            SetWindowPos(hwnd, NULL, sug->left, sug->top,
+                         sug->right - sug->left, sug->bottom - sug->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            if (nw->gfx) gfx_set_dpi(nw->gfx, nw_dpi(hwnd));   /* rescale text formats */
+            for (int i = 0; i < nw->ntabs; i++) {
+                /* re-establish body char formats at the new DPI, then restyle */
+                CHARFORMAT2W cf; memset(&cf, 0, sizeof cf);
+                cf.cbSize = sizeof cf; cf.dwMask = CFM_COLOR | CFM_FACE | CFM_SIZE;
+                cf.crTextColor = COL_TEXT; cf.yHeight = nw_body_yheight(hwnd);
+                wcscpy(cf.szFaceName, L"IBM Plex Mono");
+                SendMessageW(nw->tab[i].edit, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
+                nw_apply_format_edit(nw, i);
+            }
+            nw_layout(hwnd, nw);
+            InvalidateRect(hwnd, NULL, TRUE);
         }
         return 0;
     case WM_PAINT: {
-        PAINTSTRUCT ps; HDC hdc = BeginPaint(hwnd, &ps);
-        RECT rc; GetClientRect(hwnd, &rc);
-        int vx, hy; nw_regions(hwnd, NULL, NULL, &vx, &hy);
-        /* qN icon centered in the top-left cell */
-        if (g_app_icon) {
-            int side = (vx < hy ? vx : hy) - 12; if (side < 8) side = 8;
-            int ix = (vx - side) / 2, iy = (hy - side) / 2;
-            DrawIconEx(hdc, ix, iy, g_app_icon, side, side, 0, NULL, DI_NORMAL);
+        PAINTSTRUCT ps; BeginPaint(hwnd, &ps);
+        if (nw) {
+            if (!nw->gfx) nw->gfx = gfx_create(hwnd, nw_dpi(hwnd));
+            if (nw->gfx && gfx_begin(nw->gfx, COL_BG)) {
+                nw_paint_chrome(nw, hwnd);
+                if (gfx_end(nw->gfx)) {          /* target lost: rebuild next paint */
+                    gfx_destroy(nw->gfx);
+                    nw->gfx = NULL;
+                    InvalidateRect(hwnd, NULL, FALSE);
+                }
+            }
         }
-        RECT vline = { vx, 0, vx + 1, rc.bottom };          /* sidebar | content */
-        RECT hline = { 0, hy, rc.right, hy + 1 };           /* full-width divider */
-        FillRect(hdc, &vline, g_border_brush);
-        FillRect(hdc, &hline, g_border_brush);
-
-        /* Tab strip: all tabs + ✕ glyphs + the + button (Task 6). */
-        if (nw) nw_paint_tabs(nw, hwnd, hdc);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -1529,6 +1407,10 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_LBUTTONDOWN:
         if (nw) {
+            int wb = nw_wbtn_hit(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            if (wb == 0) { ShowWindow(hwnd, SW_MINIMIZE); return 0; }
+            if (wb == 1) { ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE); return 0; }
+            if (wb == 2) { SendMessageW(hwnd, WM_CLOSE, 0, 0); return 0; }
             int idx = -1;
             TabHit h = nw_tab_hit(nw, hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &idx);
             if (h == HIT_PLUS)  { nw_add_tab(nw, hwnd); return 0; }
@@ -1552,7 +1434,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (nw->dragging) {
                 int w = nw_tab_w(nw, hwnd);
                 int center = x - nw->drag_dx + w / 2;      /* dragged tab center */
-                int target = (center - nw_strip_left()) / w;
+                int target = (center - nw_strip_left(hwnd)) / w;
                 if (target < 0) target = 0;
                 if (target > nw->ntabs - 1) target = nw->ntabs - 1;
                 if (target != nw->drag_tab) {
@@ -1576,7 +1458,15 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (h == HIT_TAB)        ht = idx;
             else if (h == HIT_CLOSE) { ht = idx; hc = 1; }
             else if (h == HIT_PLUS)  hp = 1;
-            if (ht != nw->hot_tab || hc != nw->hot_close || hp != nw->hot_plus) {
+
+            int wb = nw_wbtn_hit(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            int wchanged = 0;
+            for (int i = 0; i < NUM_WBTNS; i++) {
+                int on = (i == wb);
+                if (on != nw->whot[i]) { nw->whot[i] = on; wchanged = 1; }
+            }
+
+            if (ht != nw->hot_tab || hc != nw->hot_close || hp != nw->hot_plus || wchanged) {
                 nw->hot_tab = ht; nw->hot_close = hc; nw->hot_plus = hp;
                 RECT bar; GetClientRect(hwnd, &bar); bar.bottom = nw_titlebar_h(hwnd);
                 InvalidateRect(hwnd, &bar, TRUE);
@@ -1586,10 +1476,15 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_MOUSELEAVE:
-        if (nw && (nw->hot_tab != -1 || nw->hot_close || nw->hot_plus)) {
-            nw->hot_tab = -1; nw->hot_close = 0; nw->hot_plus = 0;
-            RECT bar; GetClientRect(hwnd, &bar); bar.bottom = nw_titlebar_h(hwnd);
-            InvalidateRect(hwnd, &bar, TRUE);
+        if (nw) {
+            int wchanged = 0;
+            for (int i = 0; i < NUM_WBTNS; i++)
+                if (nw->whot[i]) { nw->whot[i] = 0; wchanged = 1; }
+            if (nw->hot_tab != -1 || nw->hot_close || nw->hot_plus || wchanged) {
+                nw->hot_tab = -1; nw->hot_close = 0; nw->hot_plus = 0;
+                RECT bar; GetClientRect(hwnd, &bar); bar.bottom = nw_titlebar_h(hwnd);
+                InvalidateRect(hwnd, &bar, TRUE);
+            }
         }
         return 0;
     case WM_LBUTTONUP:
@@ -1639,10 +1534,6 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             nw_draw_button(nw, (const DRAWITEMSTRUCT*)lp);
             return TRUE;
         }
-        if (nw && wp >= IDW_MIN && wp <= IDW_CLOSE) {
-            nw_draw_wbutton(nw, hwnd, (const DRAWITEMSTRUCT*)lp);
-            return TRUE;
-        }
         return 0;
     case WM_COMMAND:
         if (HIWORD(wp) == BN_CLICKED && nw) {
@@ -1652,9 +1543,6 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             case IDB_STRIKE: nw_wrap_inline(nw, "~~", 2); break;
             case IDB_BULLET: nw_list_prefix(nw, 0);    break;
             case IDB_NUM:    nw_list_prefix(nw, 1);    break;
-            case IDW_MIN:    ShowWindow(hwnd, SW_MINIMIZE); return 0;
-            case IDW_MAX:    ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE); return 0;
-            case IDW_CLOSE:  SendMessageW(hwnd, WM_CLOSE, 0, 0); return 0;
             default: return 0;
             }
             if (nw_edit(nw)) SetFocus(nw_edit(nw));   /* return focus to the body after a click */
@@ -1679,6 +1567,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
         nw_registry_remove(hwnd);
         if (nw) {
+            if (nw->gfx) { gfx_destroy(nw->gfx); nw->gfx = NULL; }
             if (nw->rename_font) { DeleteObject(nw->rename_font); nw->rename_font = NULL; }
             free(nw);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -1692,6 +1581,7 @@ void note_window_register_class(HINSTANCE hInst) {
     if (!g_richedit) g_richedit = LoadLibraryW(L"Msftedit.dll");
     if (!g_bg_brush) g_bg_brush = CreateSolidBrush(COL_BG);
     if (!g_border_brush) g_border_brush = CreateSolidBrush(COL_BORDER);
+    gfx_global_init();
     WNDCLASSEXW wc; memset(&wc, 0, sizeof wc);
     wc.cbSize = sizeof wc;
     wc.lpfnWndProc = nw_proc;
