@@ -172,7 +172,6 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
 
 size_t markdown_decorate(const char* text, size_t len,
                          size_t sel_lo, size_t sel_hi, Deco** out) {
-    /* (reveal handled via c.sel_lo/c.sel_hi below) */
     DCtx c; memset(&c, 0, sizeof c);
     c.base = text; c.len = len;
     c.sel_lo = sel_lo; c.sel_hi = sel_hi;

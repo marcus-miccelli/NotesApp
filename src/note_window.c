@@ -625,15 +625,13 @@ static void nw_restyle(NoteWin* nw, int tab, int scoped) {
 
     /* apply window: whole doc, unless scoped to a single-paragraph selection */
     size_t lo = 0, hi = (size_t)len;
-    int single_para = 0;
     if (scoped) {
         size_t plo = sel_lo, phi = sel_hi;
         nw_para_bounds(buf, len, &plo, &phi);
         /* only scope when the selection stays within one paragraph */
         size_t clo = sel_hi, chi = sel_hi; nw_para_bounds(buf, len, &clo, &chi);
-        if (plo == clo && phi == chi) { lo = plo; hi = phi; single_para = 1; }
+        if (plo == clo && phi == chi) { lo = plo; hi = phi; }
     }
-    (void)single_para;
 
     Deco* d = NULL;
     size_t n = markdown_decorate(buf, (size_t)len, sel_lo, sel_hi, &d);
