@@ -1288,6 +1288,26 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             InvalidateRect(hwnd, NULL, TRUE);
         }
         return 0;
+    case WM_DPICHANGED:
+        if (nw) {
+            RECT* sug = (RECT*)lp;             /* OS-suggested position + size */
+            SetWindowPos(hwnd, NULL, sug->left, sug->top,
+                         sug->right - sug->left, sug->bottom - sug->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            if (nw->gfx) gfx_set_dpi(nw->gfx, nw_dpi(hwnd));   /* rescale text formats */
+            for (int i = 0; i < nw->ntabs; i++) {
+                /* re-establish body char formats at the new DPI, then restyle */
+                CHARFORMAT2W cf; memset(&cf, 0, sizeof cf);
+                cf.cbSize = sizeof cf; cf.dwMask = CFM_COLOR | CFM_FACE | CFM_SIZE;
+                cf.crTextColor = COL_TEXT; cf.yHeight = nw_body_yheight(hwnd);
+                wcscpy(cf.szFaceName, L"IBM Plex Mono");
+                SendMessageW(nw->tab[i].edit, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
+                nw_apply_format_edit(nw, i);
+            }
+            nw_layout(hwnd, nw);
+            InvalidateRect(hwnd, NULL, TRUE);
+        }
+        return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps; BeginPaint(hwnd, &ps);
         if (nw) {
