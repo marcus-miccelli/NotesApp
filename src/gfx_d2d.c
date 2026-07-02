@@ -192,9 +192,10 @@ void gfx_fill_round(GfxD2D* g, RECT r, int radius, unsigned col) {
     ID2D1RenderTarget_FillRoundedRectangle((ID2D1RenderTarget*)g->rt, &rr, (ID2D1Brush*)g->brush);
 }
 
-/* Tab shape: both top corners rounded, bottom square. Built as a closed path:
- * bottom-left -> up left edge -> arc top-left -> top edge -> arc top-right ->
- * down right edge -> (close back along the bottom). */
+/* Tab shape: only the top-RIGHT corner rounded; top-left and bottom square.
+ * (A tab's square top-left butts against the previous tab's rounded top-right.)
+ * Closed path: bottom-left -> up left edge -> square top-left -> top edge ->
+ * arc top-right -> down right edge -> (close back along the bottom). */
 void gfx_fill_tab(GfxD2D* g, RECT r, int radius, unsigned col) {
     if (!g || !g->rt || !g_d2d) return;
     ID2D1PathGeometry* geo = NULL;
@@ -207,7 +208,7 @@ void gfx_fill_tab(GfxD2D* g, RECT r, int radius, unsigned col) {
     float rad = (float)radius;
     D2D1_POINT_2F p;
     p.x = L; p.y = B;      ID2D1GeometrySink_BeginFigure(sink, p, D2D1_FIGURE_BEGIN_FILLED);
-    p.x = L; p.y = T + rad; ID2D1GeometrySink_AddLine(sink, p);
+    p.x = L; p.y = T; ID2D1GeometrySink_AddLine(sink, p);          /* square top-left */
 
     D2D1_ARC_SEGMENT a;
     a.size.width = rad; a.size.height = rad;
@@ -215,9 +216,8 @@ void gfx_fill_tab(GfxD2D* g, RECT r, int radius, unsigned col) {
     a.sweepDirection = D2D1_SWEEP_DIRECTION_CLOCKWISE;
     a.arcSize = D2D1_ARC_SIZE_SMALL;
 
-    a.point.x = L + rad; a.point.y = T; ID2D1GeometrySink_AddArc(sink, &a);
-    p.x = R - rad; p.y = T; ID2D1GeometrySink_AddLine(sink, p);
-    a.point.x = R; a.point.y = T + rad; ID2D1GeometrySink_AddArc(sink, &a);
+    p.x = R - rad; p.y = T; ID2D1GeometrySink_AddLine(sink, p);    /* top edge */
+    a.point.x = R; a.point.y = T + rad; ID2D1GeometrySink_AddArc(sink, &a);  /* round top-right only */
     p.x = R; p.y = B; ID2D1GeometrySink_AddLine(sink, p);
 
     ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_CLOSED);

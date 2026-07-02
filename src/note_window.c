@@ -98,6 +98,7 @@ typedef struct {
     int   active;
     HWND  btns[NUM_BTNS];
     int   whot[NUM_WBTNS];
+    int   bhot[NUM_BTNS];      /* sidebar button hover (cursor over the square) */
     int   active_fmt[NUM_BTNS];
     /* tab hover state (WT look) */
     int   hot_tab;    /* index of tab under the cursor, or -1 */
@@ -333,7 +334,9 @@ static void nw_draw_button(NoteWin* nw, const DRAWITEMSTRUCT* d) {
     int idx = (int)d->CtlID - IDB_BOLD;
     int on = (d->itemState & ODS_SELECTED) != 0 ||
              (idx >= 0 && idx < NUM_BTNS && nw->active_fmt[idx]);
-    HBRUSH bg = CreateSolidBrush(on ? COL_TAB_ACT : COL_BG);   /* match the active-tab fill */
+    int hot = (idx >= 0 && idx < NUM_BTNS && nw->bhot[idx]);
+    /* pressed/active -> active-tab fill; else hover -> same COL_HOVER as the + button */
+    HBRUSH bg = CreateSolidBrush(on ? COL_TAB_ACT : (hot ? COL_HOVER : COL_BG));
     FillRect(d->hDC, &d->rcItem, bg);
     DeleteObject(bg);
 
@@ -352,6 +355,26 @@ static void nw_draw_button(NoteWin* nw, const DRAWITEMSTRUCT* d) {
 
     SelectObject(d->hDC, old);
     DeleteObject(f);
+}
+
+/* Subclass for sidebar buttons: track hover so the square highlights (COL_HOVER)
+ * like the + button. BS_OWNERDRAW alone gives no hot state, and the buttons are
+ * child HWNDs so the parent's WM_MOUSEMOVE never fires over them. id is the
+ * button index (0..NUM_BTNS-1). */
+static LRESULT CALLBACK nw_btn_sub(HWND h, UINT msg, WPARAM wp, LPARAM lp,
+                                   UINT_PTR id, DWORD_PTR ref) {
+    NoteWin* nw = (NoteWin*)ref;
+    if (msg == WM_MOUSEMOVE) {
+        if (id < NUM_BTNS && !nw->bhot[id]) {
+            nw->bhot[id] = 1;
+            TRACKMOUSEEVENT tme = { sizeof tme, TME_LEAVE, h, 0 };
+            TrackMouseEvent(&tme);
+            InvalidateRect(h, NULL, TRUE);
+        }
+    } else if (msg == WM_MOUSELEAVE) {
+        if (id < NUM_BTNS) { nw->bhot[id] = 0; InvalidateRect(h, NULL, TRUE); }
+    }
+    return DefSubclassProc(h, msg, wp, lp);
 }
 
 /* Read the body as RichEdit-indexed text (\r breaks, CP_ACP); caller frees.
@@ -1077,7 +1100,7 @@ static void nw_begin_rename(NoteWin* nw, HWND hwnd) {
         WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,     /* no border — we draw an accent frame */
         er.left, er.top, er.right - er.left, er.bottom - er.top,
         hwnd, (HMENU)ID_RENAME, GetModuleHandleW(NULL), NULL);
-    nw->rename_font = CreateFontW(-nw_s(hwnd,14),0,0,0,FW_SEMIBOLD,0,0,0,0,0,0,0,0,L"IBM Plex Mono");
+    nw->rename_font = CreateFontW(-nw_s(hwnd,14),0,0,0,FW_SEMIBOLD,0,0,0,0,0,0,0,0,L"Segoe UI");
     SendMessageW(nw->rename_edit, WM_SETFONT, (WPARAM)nw->rename_font, TRUE);
     SetWindowTextA(nw->rename_edit, m && m->name[0] ? m->name : "");
     SendMessageW(nw->rename_edit, EM_SETSEL, 0, -1);
@@ -1148,7 +1171,7 @@ static void nw_paint_tabs(NoteWin* nw, HWND hwnd) {
 
         int fill_left = r.left;
         if (i > 0) fill_left -= radius;
-        RECT shape = { fill_left, r.top + nw_s(hwnd, TAB_TOP_GAP), r.right, r.bottom - 1 };
+        RECT shape = { fill_left, r.top + nw_s(hwnd, TAB_TOP_GAP), r.right, r.bottom };
 
         unsigned fill = COL_BG;
         if (isact)      fill = COL_TAB_ACT;
@@ -1243,6 +1266,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                 0, 0, SIDEBAR_W, SIDEBAR_W, hwnd,   /* real size set in nw_layout */
                 (HMENU)(INT_PTR)btndefs[i].id, cs->hInstance, NULL);
+            SetWindowSubclass(nw->btns[i], nw_btn_sub, (UINT_PTR)i, (DWORD_PTR)nw);
         }
 
         /* Custom frame: extend the client over the caption (so we draw the title
