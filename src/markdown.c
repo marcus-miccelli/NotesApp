@@ -91,6 +91,7 @@ typedef struct {
     /* inline span stack */
     struct { MdFmt fmt; int marklen; int start_set; } sp[64];
     int    depth;
+    int    over;   /* tracked opens dropped past the depth cap; unwound on leave */
     size_t last_text_end;
     size_t close_cursor;
 } DCtx;
@@ -140,7 +141,8 @@ static int span_marklen(MD_SPANTYPE t) {
 }
 static int d_enter_span(MD_SPANTYPE t, void* detail, void* ud) {
     (void)detail; DCtx* c = (DCtx*)ud;
-    if (!span_fmt(t) || c->depth >= 64) return 0;
+    if (!span_fmt(t)) return 0;
+    if (c->depth >= 64) { c->over++; return 0; }   /* dropped; balance on leave */
     c->sp[c->depth].fmt = span_fmt(t);
     c->sp[c->depth].marklen = span_marklen(t);
     c->sp[c->depth].start_set = 0;
@@ -149,7 +151,9 @@ static int d_enter_span(MD_SPANTYPE t, void* detail, void* ud) {
 }
 static int d_leave_span(MD_SPANTYPE t, void* detail, void* ud) {
     (void)detail; DCtx* c = (DCtx*)ud;
-    if (!span_fmt(t) || c->depth <= 0) return 0;
+    if (!span_fmt(t)) return 0;
+    if (c->over > 0) { c->over--; return 0; }       /* unwind a dropped open */
+    if (c->depth <= 0) return 0;
     c->depth--;
     int ml = c->sp[c->depth].marklen; if (ml < 0) ml = 0;
     size_t base = c->last_text_end > c->close_cursor ? c->last_text_end
@@ -172,7 +176,8 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
             while (j > 0 && c->base[j-1] == '`') { j--; k++; }
             ml = k; c->sp[i].marklen = ml;
         }
-        if ((size_t)ml <= cursor)
+        if ((size_t)ml > cursor) ml = (int)cursor;   /* clamp: never underflow */
+        if (ml > 0)
             push(c, DECO_HIDE, cursor - (size_t)ml, (size_t)ml, 0, PARA_NONE, 0);
         cursor -= (size_t)ml;
         c->sp[i].start_set = 1;
