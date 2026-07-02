@@ -172,4 +172,16 @@ void test_markdown(void) {
         CHECK(hides == 4);
         free(d);
     }
+
+    /* --- markdown_fmt_at --- */
+    {
+        const char* t = "**bold**";
+        CHECK(markdown_fmt_at(t, strlen(t), 4) == MD_FMT_BOLD);   /* inside */
+        CHECK(markdown_fmt_at(t, strlen(t), 0) == 0);             /* on marker */
+    }
+    {
+        const char* t = "a *i* b";
+        CHECK(markdown_fmt_at(t, strlen(t), 3) == MD_FMT_ITALIC); /* inside i */
+        CHECK(markdown_fmt_at(t, strlen(t), 0) == 0);             /* plain */
+    }
 }

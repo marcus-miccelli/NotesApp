@@ -33,4 +33,7 @@ typedef struct {
 size_t markdown_decorate(const char* text, size_t len,
                          size_t sel_lo, size_t sel_hi, Deco** out);
 
+/* Inline format flags active at a caret offset (for sidebar toggles). */
+MdFmt markdown_fmt_at(const char* text, size_t len, size_t caret);
+
 #endif

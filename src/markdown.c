@@ -262,3 +262,19 @@ size_t markdown_decorate(const char* text, size_t len,
     *out = c.arr;
     return c.count;
 }
+
+MdFmt markdown_fmt_at(const char* text, size_t len, size_t caret) {
+    Deco* d = NULL;
+    size_t n = markdown_decorate(text, len, (size_t)-1, 0, &d);
+    MdFmt f = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (d[i].kind != DECO_FMT) continue;
+        size_t a = d[i].start, b = a + d[i].len;
+        /* cover the char on either side of the caret so a boundary still lights */
+        if ((caret > a && caret <= b) || (caret >= a && caret < b))
+            f |= d[i].fmt;
+    }
+    free(d);
+    f &= ~(MdFmt)(MD_FMT_H1 | MD_FMT_H2 | MD_FMT_H3);   /* headings not toggles */
+    return f;
+}
