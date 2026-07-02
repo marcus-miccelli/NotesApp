@@ -122,4 +122,30 @@ void test_markdown(void) {
         CHECK(d[0].kind == DECO_HIDE && d[0].start == 0 && d[0].len == 2);
         free(d);
     }
+
+    /* --- markdown_decorate: lists --- */
+    {   /* bullet list: "- a\n- b" */
+        const char* t = "- a\n- b";
+        Deco* d = NULL; size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d);
+        int bullets = 0, hides = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (d[i].kind == DECO_PARA && d[i].para == PARA_BULLET) bullets++;
+            if (d[i].kind == DECO_HIDE && d[i].len == 2) hides++;  /* "- " */
+        }
+        CHECK(bullets == 2);
+        CHECK(hides >= 2);
+        free(d);
+    }
+    {   /* numbered list: "1. a\n2. b" -> ordinals 1 and 2 */
+        const char* t = "1. a\n2. b";
+        Deco* d = NULL; size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d);
+        int n1 = 0, n2 = 0;
+        for (size_t i = 0; i < n; i++)
+            if (d[i].kind == DECO_PARA && d[i].para == PARA_NUMBER) {
+                if (d[i].number == 1) n1 = 1;
+                if (d[i].number == 2) n2 = 1;
+            }
+        CHECK(n1 == 1 && n2 == 1);
+        free(d);
+    }
 }

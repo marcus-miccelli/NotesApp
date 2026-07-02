@@ -94,6 +94,11 @@ typedef struct {
     int    over;   /* tracked opens dropped past the depth cap; unwound on leave */
     size_t last_text_end;
     size_t close_cursor;
+    /* list state (single level) */
+    ParaKind listkind;
+    int      listnum;      /* next ordinal for ordered lists */
+    int      in_li;
+    int      li_first_text;
 } DCtx;
 
 static void push(DCtx* c, DecoKind k, size_t start, size_t len,
@@ -120,11 +125,22 @@ static int d_enter_block(MD_BLOCKTYPE t, void* detail, void* ud) {
         MD_BLOCK_H_DETAIL* d = (MD_BLOCK_H_DETAIL*)detail;
         c->in_heading = 1; c->h_first_text = 0; c->h_fmt = dh_fmt(d->level);
     }
+    if (t == MD_BLOCK_UL) { c->listkind = PARA_BULLET; }
+    if (t == MD_BLOCK_OL) {
+        MD_BLOCK_OL_DETAIL* d = (MD_BLOCK_OL_DETAIL*)detail;
+        c->listkind = PARA_NUMBER; c->listnum = (int)d->start;
+    }
+    if (t == MD_BLOCK_LI) { c->in_li = 1; c->li_first_text = 0; }
     return 0;
 }
 static int d_leave_block(MD_BLOCKTYPE t, void* detail, void* ud) {
     (void)detail; DCtx* c = (DCtx*)ud;
     if (t == MD_BLOCK_H) c->in_heading = 0;
+    if (t == MD_BLOCK_LI) {
+        c->in_li = 0;
+        if (c->listkind == PARA_NUMBER) c->listnum++;
+    }
+    if (t == MD_BLOCK_UL || t == MD_BLOCK_OL) c->listkind = PARA_NONE;
     return 0;
 }
 static MdFmt span_fmt(MD_SPANTYPE t) {
@@ -181,6 +197,16 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
             push(c, DECO_HIDE, cursor - (size_t)ml, (size_t)ml, 0, PARA_NONE, 0);
         cursor -= (size_t)ml;
         c->sp[i].start_set = 1;
+    }
+
+    if (c->in_li && !c->li_first_text) {
+        c->li_first_text = 1;
+        size_t ls = off;
+        while (ls > 0 && c->base[ls-1] != '\n' && c->base[ls-1] != '\r') ls--;
+        push(c, DECO_HIDE, ls, off - ls, 0, PARA_NONE, 0);           /* "- "/"N. " */
+        push(c, DECO_PARA, ls, (off - ls) + (size_t)size,
+             0, c->listkind,
+             c->listkind == PARA_NUMBER ? c->listnum : 0);
     }
 
     MdFmt f = 0;
