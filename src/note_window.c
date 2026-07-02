@@ -114,6 +114,7 @@ typedef struct {
     HFONT rename_font;  /* font for the rename edit; freed on commit */
     int   rename_tab;   /* index of the tab being renamed */
     GfxD2D* gfx;        /* Direct2D chrome renderer; lazy-created in WM_PAINT */
+    size_t last_caret_para;   /* start offset of the paragraph last revealed */
 } NoteWin;
 
 static HMODULE g_richedit = NULL;
@@ -593,30 +594,60 @@ static void nw_apply_decos(HWND edit, int len, Deco* d, size_t n, size_t lo, siz
     }
 }
 
-/* Live markdown restyle of one tab's body RichEdit. */
-static void nw_apply_format_edit(NoteWin* nw, int i) {
-    HWND edit = nw->tab[i].edit;
-    SendMessageW(edit, EM_SETEVENTMASK, 0, 0);            /* mute reentrancy */
+/* Expand [lo,hi] to full source-paragraph boundaries in buf. */
+static void nw_para_bounds(const char* buf, int len, size_t* lo, size_t* hi) {
+    size_t a = *lo, b = *hi;
+    while (a > 0 && buf[a-1] != '\r' && buf[a-1] != '\n') a--;
+    while (b < (size_t)len && buf[b] != '\r' && buf[b] != '\n') b++;
+    *lo = a; *hi = b;
+}
+
+/* Restyle a tab body. scoped=1 limits the reset+apply to the paragraph(s) the
+ * selection touches (fast path for edits/caret moves); scoped=0 does the whole
+ * document (load). Markers reveal in the selection's paragraph(s). */
+static void nw_restyle(NoteWin* nw, int tab, int scoped) {
+    HWND edit = nw->tab[tab].edit;
+    SendMessageW(edit, EM_SETEVENTMASK, 0, 0);
 
     GETTEXTLENGTHEX gtl; gtl.flags = GTL_DEFAULT; gtl.codepage = CP_ACP;
     int len = (int)SendMessageW(edit, EM_GETTEXTLENGTHEX, (WPARAM)&gtl, 0);
-    if (len <= 0) { SendMessageW(edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK); return; }
+    if (len < 0) len = 0;
     char* buf = malloc((size_t)len + 1);
     if (!buf) { SendMessageW(edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK); return; }
-    GETTEXTEX gte; gte.cb = (DWORD)(len + 1); gte.flags = GT_DEFAULT;
-    gte.codepage = CP_ACP; gte.lpDefaultChar = NULL; gte.lpUsedDefChar = NULL;
-    SendMessageW(edit, EM_GETTEXTEX, (WPARAM)&gte, (LPARAM)buf);
+    if (len > 0) {
+        GETTEXTEX gte; gte.cb = (DWORD)(len + 1); gte.flags = GT_DEFAULT;
+        gte.codepage = CP_ACP; gte.lpDefaultChar = NULL; gte.lpUsedDefChar = NULL;
+        SendMessageW(edit, EM_GETTEXTEX, (WPARAM)&gte, (LPARAM)buf);
+    } else buf[0] = '\0';
 
     CHARRANGE saved; SendMessageW(edit, EM_EXGETSEL, 0, (LPARAM)&saved);
+    size_t sel_lo = (size_t)saved.cpMin, sel_hi = (size_t)saved.cpMax;
+
+    /* apply window: whole doc, unless scoped to a single-paragraph selection */
+    size_t lo = 0, hi = (size_t)len;
+    int single_para = 0;
+    if (scoped) {
+        size_t plo = sel_lo, phi = sel_hi;
+        nw_para_bounds(buf, len, &plo, &phi);
+        /* only scope when the selection stays within one paragraph */
+        size_t clo = sel_hi, chi = sel_hi; nw_para_bounds(buf, len, &clo, &chi);
+        if (plo == clo && phi == chi) { lo = plo; hi = phi; single_para = 1; }
+    }
+    (void)single_para;
 
     Deco* d = NULL;
-    size_t n = markdown_decorate(buf, (size_t)len, (size_t)-1, 0, &d);  /* hide all */
-    nw_apply_decos(edit, len, d, n, 0, (size_t)len);
+    size_t n = markdown_decorate(buf, (size_t)len, sel_lo, sel_hi, &d);
+    nw_apply_decos(edit, len, d, n, lo, hi);
     free(d);
     free(buf);
 
-    SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&saved);   /* restore caret */
+    SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&saved);
     SendMessageW(edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
+}
+
+/* Live markdown restyle of one tab's body RichEdit. */
+static void nw_apply_format_edit(NoteWin* nw, int i) {
+    nw_restyle(nw, i, 0);   /* whole-document (load / programmatic reformat) */
 }
 
 static void nw_apply_format(NoteWin* nw) {
@@ -1432,6 +1463,23 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_NOTIFY: {
         NMHDR* hdr = (NMHDR*)lp;
         if (nw && hdr->code == EN_SELCHANGE && hdr->idFrom == ID_EDIT) {
+            {
+                HWND e = nw_edit(nw);
+                CHARRANGE sel; SendMessageW(e, EM_EXGETSEL, 0, (LPARAM)&sel);
+                int len; char* b = nw_body_text(e, &len);
+                if (b) {
+                    size_t lo = (size_t)sel.cpMin, hi = lo;
+                    nw_para_bounds(b, len, &lo, &hi);
+                    free(b);
+                    if (lo != nw->last_caret_para) {
+                        nw->last_caret_para = lo;
+                        SendMessageW(e, WM_SETREDRAW, FALSE, 0);
+                        nw_restyle(nw, nw->active, 0);   /* whole doc: flip reveal */
+                        SendMessageW(e, WM_SETREDRAW, TRUE, 0);
+                        InvalidateRect(e, NULL, TRUE);
+                    }
+                }
+            }
             nw_update_toggles(nw);
             return 0;
         }
@@ -1486,7 +1534,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             KillTimer(hwnd, IDT_DEBOUNCE);
             SendMessageW(e, WM_SETREDRAW, FALSE, 0);
             nw_save_tab(nw, nw->active);
-            nw_apply_format(nw);
+            nw_restyle(nw, nw->active, 1);   /* scoped to the edited paragraph */
             SendMessageW(e, WM_SETREDRAW, TRUE, 0);
             InvalidateRect(e, NULL, TRUE);
             nw_update_toggles(nw);
