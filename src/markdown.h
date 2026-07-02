@@ -15,4 +15,22 @@ typedef struct { size_t start; size_t len; MdFmt fmt; } MdSpan;
 
 size_t markdown_spans(const char* text, size_t len, MdSpan* out, size_t out_cap);
 
+typedef enum { DECO_FMT, DECO_HIDE, DECO_PARA } DecoKind;
+typedef enum { PARA_NONE, PARA_BULLET, PARA_NUMBER } ParaKind;
+
+typedef struct {
+    DecoKind kind;
+    size_t   start;   /* RichEdit char offset */
+    size_t   len;
+    MdFmt    fmt;     /* DECO_FMT */
+    ParaKind para;    /* DECO_PARA */
+    int      number;  /* DECO_PARA + PARA_NUMBER: ordinal */
+} Deco;
+
+/* Build the full-document decoration list. Markers hide everywhere except the
+ * paragraph(s) intersecting [sel_lo, sel_hi]; pass sel_lo > sel_hi to hide all.
+ * *out is malloc'd (free() it). Returns the count. Grows dynamically. */
+size_t markdown_decorate(const char* text, size_t len,
+                         size_t sel_lo, size_t sel_hi, Deco** out);
+
 #endif

@@ -1,4 +1,5 @@
 #include <string.h>
+#include <stdlib.h>
 #include "test.h"
 #include "markdown.h"
 
@@ -50,5 +51,24 @@ void test_markdown(void) {
         const char* t = "just words";
         size_t n = markdown_spans(t, strlen(t), s, 32);
         CHECK(n == 0);
+    }
+
+    /* --- markdown_decorate: headings --- */
+    {
+        const char* t = "# Hi";
+        Deco* d = NULL;
+        size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d);
+        CHECK(n == 2);
+        CHECK(d[0].kind == DECO_HIDE && d[0].start == 0 && d[0].len == 2);  /* "# " */
+        CHECK(d[1].kind == DECO_FMT && d[1].start == 2 && d[1].len == 2 &&
+              d[1].fmt == MD_FMT_H1);
+        free(d);
+    }
+    {
+        const char* t = "plain words";
+        Deco* d = NULL;
+        size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d);
+        CHECK(n == 0);
+        free(d);
     }
 }
