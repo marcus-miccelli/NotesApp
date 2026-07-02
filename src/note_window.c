@@ -84,6 +84,7 @@ static const COLORREF COL_TAB_ACT = RGB(0x1b, 0x1b, 0x1f);  /* active tab fill *
 static const COLORREF COL_TAB_HOT = RGB(0x15, 0x15, 0x17);  /* hovered tab fill */
 static const COLORREF COL_RENAME  = RGB(0x0f, 0x0f, 0x12);  /* rename field bg */
 static const COLORREF COL_ACCENT  = RGB(0x3a, 0x7a, 0xfe);  /* rename outline */
+static const COLORREF COL_CODE_BG = RGB(0x18, 0x18, 0x1c);  /* code-block background */
 
 typedef struct {
     char id[16];      /* note id */
@@ -538,8 +539,10 @@ static void nw_fmt_range(HWND edit, size_t start, size_t len, MdFmt fmt) {
     CHARRANGE r = { (LONG)start, (LONG)(start + len) };
     SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&r);
     CHARFORMAT2W cf; memset(&cf, 0, sizeof cf); cf.cbSize = sizeof cf;
-    cf.dwMask = CFM_BOLD|CFM_ITALIC|CFM_STRIKEOUT|CFM_SIZE|CFM_FACE|CFM_COLOR|CFM_HIDDEN;
+    cf.dwMask = CFM_BOLD|CFM_ITALIC|CFM_STRIKEOUT|CFM_SIZE|CFM_FACE|CFM_COLOR|CFM_HIDDEN|CFM_BACKCOLOR;
     cf.crTextColor = COL_TEXT;
+    cf.crBackColor = COL_BG;
+    if (fmt & MD_FMT_CODEBLOCK) cf.crBackColor = COL_CODE_BG;
     cf.yHeight = 200;
     if (fmt & MD_FMT_H1) cf.yHeight = 360;
     else if (fmt & MD_FMT_H2) cf.yHeight = 300;
@@ -579,8 +582,9 @@ static void nw_apply_decos(HWND edit, int len, Deco* d, size_t n, size_t lo, siz
     CHARRANGE base = { (LONG)lo, (LONG)hi };
     SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&base);
     CHARFORMAT2W bf; memset(&bf, 0, sizeof bf); bf.cbSize = sizeof bf;
-    bf.dwMask = CFM_BOLD|CFM_ITALIC|CFM_STRIKEOUT|CFM_SIZE|CFM_FACE|CFM_COLOR|CFM_HIDDEN;
-    bf.yHeight = 200; bf.crTextColor = COL_TEXT; wcscpy(bf.szFaceName, L"IBM Plex Mono");
+    bf.dwMask = CFM_BOLD|CFM_ITALIC|CFM_STRIKEOUT|CFM_SIZE|CFM_FACE|CFM_COLOR|CFM_HIDDEN|CFM_BACKCOLOR;
+    bf.yHeight = 200; bf.crTextColor = COL_TEXT; bf.crBackColor = COL_BG;
+    wcscpy(bf.szFaceName, L"IBM Plex Mono");
     SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&bf);
     /* also clear paragraph numbering across the range, so un-listing reverts */
     nw_para_range(edit, lo, hi > lo ? hi - lo : 0, PARA_NONE);

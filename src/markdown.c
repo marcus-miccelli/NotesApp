@@ -14,6 +14,9 @@ typedef struct {
     int    in_heading;
     int    h_first_text;
     MdFmt  h_fmt;
+    /* code block state */
+    int    in_code;
+    int    code_first_text;
     /* inline span stack */
     struct { MdFmt fmt; int marklen; int start_set; } sp[64];
     int    depth;
@@ -76,6 +79,7 @@ static int d_enter_block(MD_BLOCKTYPE t, void* detail, void* ud) {
         c->listkind = PARA_NUMBER; c->listnum = (int)d->start;
     }
     if (t == MD_BLOCK_LI) { c->in_li = 1; c->li_first_text = 0; }
+    if (t == MD_BLOCK_CODE) { c->in_code = 1; c->code_first_text = 0; }
     return 0;
 }
 static int d_leave_block(MD_BLOCKTYPE t, void* detail, void* ud) {
@@ -86,6 +90,20 @@ static int d_leave_block(MD_BLOCKTYPE t, void* detail, void* ud) {
         if (c->listkind == PARA_NUMBER) c->listnum++;
     }
     if (t == MD_BLOCK_UL || t == MD_BLOCK_OL) c->listkind = PARA_NONE;
+    if (t == MD_BLOCK_CODE) {
+        size_t ce = c->last_text_end;
+        /* Skip any CR/LF after the code content, but only if within bounds */
+        if (ce < c->len && c->base[ce] == '\r') ce++;
+        if (ce < c->len && c->base[ce] == '\n') ce++;      /* closing fence line start */
+        /* Only hide the closing fence if we're still within bounds */
+        if (ce < c->len) {
+            size_t fe = ce;
+            while (fe < c->len && c->base[fe] != '\n' && c->base[fe] != '\r') fe++;
+            if (fe > ce) push(c, DECO_HIDE, ce, fe - ce, 0, PARA_NONE, 0);
+        }
+        c->in_code = 0;
+        c->code_first_text = 0;
+    }
     return 0;
 }
 static MdFmt span_fmt(MD_SPANTYPE t) {
@@ -126,6 +144,23 @@ static int d_leave_span(MD_SPANTYPE t, void* detail, void* ud) {
 static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
     (void)tt; DCtx* c = (DCtx*)ud;
     size_t off = (size_t)(text - c->base);
+
+    if (c->in_code) {
+        if (!c->code_first_text && off < c->len) {
+            c->code_first_text = 1;
+            size_t p = off;                                 /* hide opening fence line */
+            if (p > 0 && c->base[p-1] == '\n') p--;
+            if (p > 0 && c->base[p-1] == '\r') p--;
+            size_t fs = p;
+            while (fs > 0 && c->base[fs-1] != '\n' && c->base[fs-1] != '\r') fs--;
+            push(c, DECO_HIDE, fs, off - fs, 0, PARA_NONE, 0);
+        }
+        if (off + (size_t)size <= c->len) {
+            push(c, DECO_FMT, off, (size_t)size, MD_FMT_CODEBLOCK, PARA_NONE, 0);
+            c->last_text_end = off + (size_t)size;
+        }
+        return 0;
+    }
 
     /* resolve opening markers for spans opened since the last text run,
      * innermost first, consuming delimiter chars leftward from off. */

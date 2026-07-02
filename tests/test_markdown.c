@@ -135,4 +135,18 @@ void test_markdown(void) {
         CHECK(markdown_fmt_at(t, strlen(t), 3) == MD_FMT_ITALIC); /* inside i */
         CHECK(markdown_fmt_at(t, strlen(t), 0) == 0);             /* plain */
     }
+
+    /* --- fenced code block --- */
+    {
+        const char* t = "```\ncode\n```";
+        Deco* d = NULL; size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d);
+        int codefmt = 0, hides = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (d[i].kind == DECO_FMT && (d[i].fmt & MD_FMT_CODEBLOCK)) codefmt = 1;
+            if (d[i].kind == DECO_HIDE) hides++;
+        }
+        CHECK(codefmt == 1);   /* "code" styled as code block */
+        CHECK(hides >= 2);     /* opening + closing fences hidden */
+        free(d);
+    }
 }
