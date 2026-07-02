@@ -88,6 +88,11 @@ typedef struct {
     int    in_heading;
     int    h_first_text;
     MdFmt  h_fmt;
+    /* inline span stack */
+    struct { MdFmt fmt; int marklen; int start_set; } sp[64];
+    int    depth;
+    size_t last_text_end;
+    size_t close_cursor;
 } DCtx;
 
 static void push(DCtx* c, DecoKind k, size_t start, size_t len,
@@ -121,20 +126,71 @@ static int d_leave_block(MD_BLOCKTYPE t, void* detail, void* ud) {
     if (t == MD_BLOCK_H) c->in_heading = 0;
     return 0;
 }
+static MdFmt span_fmt(MD_SPANTYPE t) {
+    if (t == MD_SPAN_STRONG) return MD_FMT_BOLD;
+    if (t == MD_SPAN_EM)     return MD_FMT_ITALIC;
+    if (t == MD_SPAN_DEL)    return MD_FMT_STRIKE;
+    if (t == MD_SPAN_CODE)   return MD_FMT_CODE;
+    return 0;
+}
+static int span_marklen(MD_SPANTYPE t) {
+    if (t == MD_SPAN_STRONG || t == MD_SPAN_DEL) return 2;
+    if (t == MD_SPAN_EM)                          return 1;
+    return -1;   /* code: computed lazily from the backtick run */
+}
+static int d_enter_span(MD_SPANTYPE t, void* detail, void* ud) {
+    (void)detail; DCtx* c = (DCtx*)ud;
+    if (!span_fmt(t) || c->depth >= 64) return 0;
+    c->sp[c->depth].fmt = span_fmt(t);
+    c->sp[c->depth].marklen = span_marklen(t);
+    c->sp[c->depth].start_set = 0;
+    c->depth++;
+    return 0;
+}
+static int d_leave_span(MD_SPANTYPE t, void* detail, void* ud) {
+    (void)detail; DCtx* c = (DCtx*)ud;
+    if (!span_fmt(t) || c->depth <= 0) return 0;
+    c->depth--;
+    int ml = c->sp[c->depth].marklen; if (ml < 0) ml = 0;
+    size_t base = c->last_text_end > c->close_cursor ? c->last_text_end
+                                                     : c->close_cursor;
+    if (ml > 0) push(c, DECO_HIDE, base, (size_t)ml, 0, PARA_NONE, 0);
+    c->close_cursor = base + (size_t)ml;
+    return 0;
+}
 static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
     (void)tt; DCtx* c = (DCtx*)ud;
     size_t off = (size_t)(text - c->base);
+
+    /* resolve opening markers for spans opened since the last text run,
+     * innermost first, consuming delimiter chars leftward from off. */
+    size_t cursor = off;
+    for (int i = c->depth - 1; i >= 0 && !c->sp[i].start_set; i--) {
+        int ml = c->sp[i].marklen;
+        if (ml < 0) {                         /* code: count backticks left */
+            size_t j = cursor; int k = 0;
+            while (j > 0 && c->base[j-1] == '`') { j--; k++; }
+            ml = k; c->sp[i].marklen = ml;
+        }
+        if ((size_t)ml <= cursor)
+            push(c, DECO_HIDE, cursor - (size_t)ml, (size_t)ml, 0, PARA_NONE, 0);
+        cursor -= (size_t)ml;
+        c->sp[i].start_set = 1;
+    }
+
     MdFmt f = 0;
+    for (int i = 0; i < c->depth; i++) f |= c->sp[i].fmt;
     if (c->in_heading) {
         if (!c->h_first_text) {
             c->h_first_text = 1;
             size_t ls = off;
             while (ls > 0 && c->base[ls-1] != '\n' && c->base[ls-1] != '\r') ls--;
-            push(c, DECO_HIDE, ls, off - ls, 0, PARA_NONE, 0);   /* "# " */
+            push(c, DECO_HIDE, ls, off - ls, 0, PARA_NONE, 0);
         }
         f |= c->h_fmt;
     }
     if (f) push(c, DECO_FMT, off, (size_t)size, f, PARA_NONE, 0);
+    c->last_text_end = off + (size_t)size;
     return 0;
 }
 
@@ -149,6 +205,8 @@ size_t markdown_decorate(const char* text, size_t len,
     p.enter_block = d_enter_block;
     p.leave_block = d_leave_block;
     p.text        = d_text;
+    p.enter_span = d_enter_span;
+    p.leave_span = d_leave_span;
     md_parse(text, (MD_SIZE)len, &p, &c);
     *out = c.arr;
     return c.count;
