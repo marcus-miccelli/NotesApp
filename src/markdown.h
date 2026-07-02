@@ -11,10 +11,6 @@ typedef unsigned MdFmt;
 #define MD_FMT_H3     (1u<<5)
 #define MD_FMT_STRIKE (1u<<6)
 
-typedef struct { size_t start; size_t len; MdFmt fmt; } MdSpan;
-
-size_t markdown_spans(const char* text, size_t len, MdSpan* out, size_t out_cap);
-
 typedef enum { DECO_FMT, DECO_HIDE, DECO_PARA } DecoKind;
 typedef enum { PARA_NONE, PARA_BULLET, PARA_NUMBER } ParaKind;
 

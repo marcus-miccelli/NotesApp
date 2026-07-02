@@ -436,20 +436,9 @@ static void nw_update_toggles(NoteWin* nw) {
     HWND e = nw_edit(nw);
 
     CHARRANGE sel; SendMessageW(e, EM_EXGETSEL, 0, (LPARAM)&sel);
-    LONG caret = sel.cpMin;
     int len; char* buf = nw_body_text(e, &len);
     if (buf) {
-        MdSpan spans[256];
-        size_t n = markdown_spans(buf, (size_t)len, spans, 256);
-        if (n > 256) n = 256;
-        MdFmt f = 0;
-        for (size_t i = 0; i < n; i++) {
-            LONG a = (LONG)spans[i].start, b = a + (LONG)spans[i].len;
-            /* cover the char on either side of the caret, so the highlight
-             * holds right at a format boundary too */
-            if ((caret > a && caret <= b) || (caret >= a && caret < b))
-                f |= spans[i].fmt;
-        }
+        MdFmt f = markdown_fmt_at(buf, (size_t)len, (size_t)sel.cpMin);
         s[0] = (f & MD_FMT_BOLD)   != 0;
         s[1] = (f & MD_FMT_ITALIC) != 0;
         s[2] = (f & MD_FMT_STRIKE) != 0;
@@ -525,156 +514,90 @@ static void nw_save_geometry(HWND hwnd, WinMeta* w) {
 }
 
 /*
- * nw_set_range_fmt / nw_apply_format — live markdown styling on each debounce tick.
+ * nw_apply_decos / nw_apply_format — live markdown styling on each debounce tick.
  *
  * CRLF/offset note: GetWindowTextA returns \r\n (2 bytes per line break), but
  * RichEdit's internal character positions (used by EM_EXSETSEL / CHARRANGE) count
  * each paragraph break as a SINGLE character.  Feeding a \r\n buffer to
- * markdown_spans would produce byte offsets that drift +1 per preceding line break,
- * causing formatting to land on wrong characters for multi-line notes.
+ * markdown_decorate would produce byte offsets that drift +1 per preceding line
+ * break, causing formatting to land on wrong characters for multi-line notes.
  *
  * Fix (option b — clean): nw_apply_format uses EM_GETTEXTEX with GT_DEFAULT and
  * CP_ACP, which returns the text with \r-only paragraph separators (matching
- * RichEdit's internal indexing).  The resulting byte offsets from markdown_spans
- * are correct for EM_EXSETSEL.  nw_save_tab is unaffected — it still uses
- * GetWindowTextA whose \r\n output is correct for .md files on Windows.
+ * RichEdit's internal indexing).  The resulting byte offsets from
+ * markdown_decorate are correct for EM_EXSETSEL.  nw_save_tab is unaffected —
+ * it still uses GetWindowTextA whose \r\n output is correct for .md files on
+ * Windows.
  *
  * md4c treats bare \r as a valid line ending (CommonMark §2.3), so parsing is
  * unaffected.
  */
-/* Apply CFE_HIDDEN to a character range: the chars stay in the buffer (so the
- * .md keeps its markers) but render at zero width. Used to "consume" markdown
- * delimiters so **bold** displays as just bold. */
-static void nw_hide_range(HWND edit, size_t start, size_t len) {
-    if (len == 0) return;
-    CHARRANGE r; r.cpMin = (LONG)start; r.cpMax = (LONG)(start + len);
+/* Map an MdFmt to a CHARFORMAT2W and apply it to [start, start+len). */
+static void nw_fmt_range(HWND edit, size_t start, size_t len, MdFmt fmt) {
+    CHARRANGE r = { (LONG)start, (LONG)(start + len) };
+    SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&r);
+    CHARFORMAT2W cf; memset(&cf, 0, sizeof cf); cf.cbSize = sizeof cf;
+    cf.dwMask = CFM_BOLD|CFM_ITALIC|CFM_STRIKEOUT|CFM_SIZE|CFM_FACE|CFM_COLOR|CFM_HIDDEN;
+    cf.crTextColor = COL_TEXT;
+    cf.yHeight = 200;
+    if (fmt & MD_FMT_H1) cf.yHeight = 360;
+    else if (fmt & MD_FMT_H2) cf.yHeight = 300;
+    else if (fmt & MD_FMT_H3) cf.yHeight = 260;
+    if (fmt & (MD_FMT_BOLD | MD_FMT_H1 | MD_FMT_H2 | MD_FMT_H3)) cf.dwEffects |= CFE_BOLD;
+    if (fmt & MD_FMT_ITALIC) cf.dwEffects |= CFE_ITALIC;
+    if (fmt & MD_FMT_STRIKE) cf.dwEffects |= CFE_STRIKEOUT;
+    wcscpy(cf.szFaceName, L"IBM Plex Mono");
+    SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+}
+
+static void nw_hide_range2(HWND edit, size_t start, size_t len) {
+    CHARRANGE r = { (LONG)start, (LONG)(start + len) };
     SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&r);
     CHARFORMAT2W cf; memset(&cf, 0, sizeof cf); cf.cbSize = sizeof cf;
     cf.dwMask = CFM_HIDDEN; cf.dwEffects = CFE_HIDDEN;
     SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
 }
 
-/* Hide the delimiter characters belonging to one formatted span, derived from
- * the literal markers adjacent to its content in buf:
- *   headings  -> the leading "#...# " up to the content (no trailing marker)
- *   code      -> the run of backticks on each side
- *   bold/italic -> up to (bold?2:0)+(italic?1:0) of * or _ on each side
- * We only hide markers next to a span md4c actually recognized, so stray or
- * escaped asterisks (no span) are left visible. */
-static void nw_apply_hidden(HWND edit, const char* buf, int len, const MdSpan* s) {
-    size_t a = s->start, b = s->start + s->len;
-    MdFmt f = s->fmt;
-    if (f & (MD_FMT_H1 | MD_FMT_H2 | MD_FMT_H3)) {
-        size_t ls = a;
-        while (ls > 0 && buf[ls-1] != '\n' && buf[ls-1] != '\r') ls--;
-        nw_hide_range(edit, ls, a - ls);          /* "# ", "## ", ... */
-        return;
-    }
-    if (f & MD_FMT_CODE) {
-        size_t i = a, cnt = 0; while (i > 0 && buf[i-1] == '`') { i--; cnt++; }
-        nw_hide_range(edit, a - cnt, cnt);
-        size_t j = b; cnt = 0; while (j < (size_t)len && buf[j] == '`') { j++; cnt++; }
-        nw_hide_range(edit, b, cnt);
-        return;
-    }
-    int want = ((f & MD_FMT_BOLD) ? 2 : 0) + ((f & MD_FMT_ITALIC) ? 1 : 0);
-    if (want) {
-        size_t i = a; int cnt = 0;
-        while (i > 0 && cnt < want && (buf[i-1] == '*' || buf[i-1] == '_')) { i--; cnt++; }
-        nw_hide_range(edit, a - (size_t)cnt, (size_t)cnt);
-        size_t j = b; cnt = 0;
-        while (j < (size_t)len && cnt < want && (buf[j] == '*' || buf[j] == '_')) { j++; cnt++; }
-        nw_hide_range(edit, b, (size_t)cnt);
-    }
-    if (f & MD_FMT_STRIKE) {                 /* ~~ on each side */
-        size_t i = a; int cnt = 0;
-        while (i > 0 && cnt < 2 && buf[i-1] == '~') { i--; cnt++; }
-        nw_hide_range(edit, a - (size_t)cnt, (size_t)cnt);
-        size_t j = b; cnt = 0;
-        while (j < (size_t)len && cnt < 2 && buf[j] == '~') { j++; cnt++; }
-        nw_hide_range(edit, b, (size_t)cnt);
-    }
-}
-
-static void nw_set_range_fmt(HWND edit, size_t start, size_t len, MdFmt fmt) {
-    CHARRANGE saved; SendMessageW(edit, EM_EXGETSEL, 0, (LPARAM)&saved);
-    CHARRANGE r; r.cpMin = (LONG)start; r.cpMax = (LONG)(start + len);
+static void nw_para_range(HWND edit, size_t start, size_t len, ParaKind kind) {
+    CHARRANGE r = { (LONG)start, (LONG)(start + len) };
     SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&r);
-
-    CHARFORMAT2W cf; memset(&cf, 0, sizeof cf); cf.cbSize = sizeof cf;
-    /* include CFM_HIDDEN (effect bit off) so content is always shown, even if a
-     * prior pass had hidden these positions. */
-    cf.dwMask = CFM_BOLD | CFM_ITALIC | CFM_STRIKEOUT | CFM_SIZE | CFM_FACE | CFM_COLOR | CFM_HIDDEN;
-    cf.crTextColor = COL_TEXT;
-    cf.yHeight = 200;                       /* 10pt default (twips) */
-    if (fmt & MD_FMT_H1) cf.yHeight = 360;
-    else if (fmt & MD_FMT_H2) cf.yHeight = 300;
-    else if (fmt & MD_FMT_H3) cf.yHeight = 260;
-    if (fmt & (MD_FMT_BOLD | MD_FMT_H1 | MD_FMT_H2 | MD_FMT_H3))
-        cf.dwEffects |= CFE_BOLD;
-    if (fmt & MD_FMT_ITALIC) cf.dwEffects |= CFE_ITALIC;
-    if (fmt & MD_FMT_STRIKE) cf.dwEffects |= CFE_STRIKEOUT;
-    wcscpy(cf.szFaceName, L"IBM Plex Mono");   /* notes are IBM Plex Mono throughout */
-    SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
-
-    SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&saved);  /* restore caret */
+    PARAFORMAT2 pf; memset(&pf, 0, sizeof pf); pf.cbSize = sizeof pf;
+    pf.dwMask = PFM_NUMBERING | PFM_NUMBERINGSTYLE | PFM_NUMBERINGTAB
+              | PFM_OFFSET | PFM_STARTINDENT;
+    if (kind == PARA_BULLET || kind == PARA_NUMBER) {
+        pf.wNumbering = (kind == PARA_NUMBER) ? PFN_ARABIC : PFN_BULLET;
+        pf.wNumberingStyle = (kind == PARA_NUMBER) ? PFNS_PERIOD : PFNS_PLAIN;
+        pf.wNumberingTab = 280; pf.dxStartIndent = 280; pf.dxOffset = 280;
+    }
+    SendMessageW(edit, EM_SETPARAFORMAT, 0, (LPARAM)&pf);
 }
 
-/* Render markdown list lines: every paragraph starting with "- " or "N. " gets
- * its literal marker hidden and a real RichEdit bullet/number with a hanging
- * indent. Non-list paragraphs have numbering cleared, so un-listing a line
- * reverts cleanly. Runs each reformat (events already muted by the caller). */
-static void nw_apply_lists(HWND edit, const char* buf, int len) {
-    size_t i = 0;
-    for (;;) {
-        size_t ls = i, le = ls;
-        while (le < (size_t)len && buf[le] != '\r' && buf[le] != '\n') le++;
+/* Reset [lo,hi] to base formatting, then apply every decoration intersecting it. */
+static void nw_apply_decos(HWND edit, int len, Deco* d, size_t n, size_t lo, size_t hi) {
+    if (hi > (size_t)len) hi = (size_t)len;
+    CHARRANGE base = { (LONG)lo, (LONG)hi };
+    SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&base);
+    CHARFORMAT2W bf; memset(&bf, 0, sizeof bf); bf.cbSize = sizeof bf;
+    bf.dwMask = CFM_BOLD|CFM_ITALIC|CFM_STRIKEOUT|CFM_SIZE|CFM_FACE|CFM_COLOR|CFM_HIDDEN;
+    bf.yHeight = 200; bf.crTextColor = COL_TEXT; wcscpy(bf.szFaceName, L"IBM Plex Mono");
+    SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&bf);
+    /* also clear paragraph numbering across the range, so un-listing reverts */
+    nw_para_range(edit, lo, hi > lo ? hi - lo : 0, PARA_NONE);
 
-        WORD numbering = 0;          /* 0 none, else PFN_BULLET / PFN_ARABIC */
-        size_t mend = ls;            /* end of literal marker to hide */
-        if (ls + 1 < le && buf[ls] == '-' && buf[ls+1] == ' ') {
-            numbering = PFN_BULLET; mend = ls + 2;
-        } else {
-            size_t q = ls;
-            while (q < le && buf[q] >= '0' && buf[q] <= '9') q++;
-            if (q > ls && q + 1 < le && buf[q] == '.' && buf[q+1] == ' ') {
-                numbering = PFN_ARABIC; mend = q + 2;
-            }
-        }
-
-        CHARRANGE r = { (LONG)ls, (LONG)le };
-        SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&r);
-        PARAFORMAT2 pf; memset(&pf, 0, sizeof pf); pf.cbSize = sizeof pf;
-        pf.dwMask = PFM_NUMBERING | PFM_NUMBERINGSTYLE | PFM_NUMBERINGTAB
-                  | PFM_OFFSET | PFM_STARTINDENT;
-        if (numbering) {
-            pf.wNumbering = numbering;
-            pf.wNumberingStyle = (numbering == PFN_ARABIC) ? PFNS_PERIOD : PFNS_PLAIN;
-            pf.wNumberingTab = 280;
-            pf.dxStartIndent = 280;
-            pf.dxOffset = 280;       /* hanging indent for wrapped lines */
-        }
-        SendMessageW(edit, EM_SETPARAFORMAT, 0, (LPARAM)&pf);
-        if (numbering) nw_hide_range(edit, ls, mend - ls);
-
-        if (le >= (size_t)len) break;
-        i = le;
-        if (i < (size_t)len && buf[i] == '\r') i++;
-        if (i < (size_t)len && buf[i] == '\n') i++;
+    for (size_t i = 0; i < n; i++) {
+        size_t a = d[i].start, b = a + d[i].len;
+        if (b <= lo || a >= hi) continue;                 /* outside range */
+        if (d[i].kind == DECO_FMT)  nw_fmt_range(edit, a, d[i].len, d[i].fmt);
+        else if (d[i].kind == DECO_HIDE) nw_hide_range2(edit, a, d[i].len);
+        else if (d[i].kind == DECO_PARA) nw_para_range(edit, a, d[i].len, d[i].para);
     }
 }
 
 /* Live markdown restyle of one tab's body RichEdit. */
 static void nw_apply_format_edit(NoteWin* nw, int i) {
     HWND edit = nw->tab[i].edit;
-    /* Applying CHARFORMAT makes RichEdit emit EN_CHANGE/EN_UPDATE. Without
-     * suppressing them, each reformat re-arms the debounce timer and we loop
-     * forever (constant reflow = flicker + the text never settles formatted).
-     * Mute notifications for the duration of the programmatic restyle. */
-    SendMessageW(edit, EM_SETEVENTMASK, 0, 0);
+    SendMessageW(edit, EM_SETEVENTMASK, 0, 0);            /* mute reentrancy */
 
-    /* Use EM_GETTEXTEX with GT_DEFAULT + CP_ACP: returns \r-only line endings
-     * whose byte offsets match RichEdit's internal character positions exactly. */
     GETTEXTLENGTHEX gtl; gtl.flags = GTL_DEFAULT; gtl.codepage = CP_ACP;
     int len = (int)SendMessageW(edit, EM_GETTEXTLENGTHEX, (WPARAM)&gtl, 0);
     if (len <= 0) { SendMessageW(edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK); return; }
@@ -684,34 +607,15 @@ static void nw_apply_format_edit(NoteWin* nw, int i) {
     gte.codepage = CP_ACP; gte.lpDefaultChar = NULL; gte.lpUsedDefChar = NULL;
     SendMessageW(edit, EM_GETTEXTEX, (WPARAM)&gte, (LPARAM)buf);
 
-    /* capture real caret BEFORE any selection changes */
-    CHARRANGE saved_sel;
-    SendMessageW(edit, EM_EXGETSEL, 0, (LPARAM)&saved_sel);
+    CHARRANGE saved; SendMessageW(edit, EM_EXGETSEL, 0, (LPARAM)&saved);
 
-    /* reset everything to default first */
-    CHARRANGE all = { 0, -1 };
-    SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&all);
-    CHARFORMAT2W base; memset(&base, 0, sizeof base); base.cbSize = sizeof base;
-    /* CFM_HIDDEN (effect off) un-hides everything so deleted/moved markers
-     * reappear before we re-hide the current ones. */
-    base.dwMask = CFM_BOLD|CFM_ITALIC|CFM_STRIKEOUT|CFM_SIZE|CFM_FACE|CFM_COLOR|CFM_HIDDEN;
-    base.yHeight = 200; base.crTextColor = COL_TEXT; wcscpy(base.szFaceName, L"IBM Plex Mono");
-    SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&base);
-
-    MdSpan spans[256];
-    size_t n = markdown_spans(buf, (size_t)len, spans, 256);
-    if (n > 256) n = 256;
-    for (size_t k = 0; k < n; k++) {
-        nw_set_range_fmt(edit, spans[k].start, spans[k].len, spans[k].fmt);
-        nw_apply_hidden(edit, buf, len, &spans[k]);   /* consume markers */
-    }
-    nw_apply_lists(edit, buf, len);     /* render "- "/"N. " as bullets/numbers */
+    Deco* d = NULL;
+    size_t n = markdown_decorate(buf, (size_t)len, (size_t)-1, 0, &d);  /* hide all */
+    nw_apply_decos(edit, len, d, n, 0, (size_t)len);
+    free(d);
     free(buf);
 
-    /* restore the real caret/selection */
-    SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&saved_sel);
-
-    /* re-enable change + key notifications now that the restyle is done */
+    SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&saved);   /* restore caret */
     SendMessageW(edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
 }
 
