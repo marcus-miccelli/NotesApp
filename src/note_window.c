@@ -10,6 +10,7 @@
 #include <windowsx.h>
 #include <commctrl.h>
 #include <dwmapi.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,7 +67,7 @@ typedef enum { HIT_NONE, HIT_TAB, HIT_CLOSE, HIT_PLUS } TabHit;
 /* Notifications we want from the RichEdit: text changes (for live-format
  * debounce), key events (shortcuts via EN_MSGFILTER), and selection changes
  * (to keep the sidebar toggle highlights in sync with the caret). */
-#define EDIT_EVENT_MASK (ENM_CHANGE | ENM_KEYEVENTS | ENM_SELCHANGE)
+#define EDIT_EVENT_MASK (ENM_CHANGE | ENM_KEYEVENTS | ENM_SELCHANGE | ENM_LINK)
 
 /* DWM dark title bar. Attribute 20 = DWMWA_USE_IMMERSIVE_DARK_MODE on
  * Windows 10 2004+ (older insider builds used 19). */
@@ -84,6 +85,7 @@ static const COLORREF COL_TAB_ACT = RGB(0x1b, 0x1b, 0x1f);  /* active tab fill *
 static const COLORREF COL_TAB_HOT = RGB(0x15, 0x15, 0x17);  /* hovered tab fill */
 static const COLORREF COL_RENAME  = RGB(0x0f, 0x0f, 0x12);  /* rename field bg */
 static const COLORREF COL_ACCENT  = RGB(0x3a, 0x7a, 0xfe);  /* rename outline */
+static const COLORREF COL_CODE_BG = RGB(0x18, 0x18, 0x1c);  /* code-block background */
 
 typedef struct {
     char id[16];      /* note id */
@@ -115,6 +117,8 @@ typedef struct {
     int   rename_tab;   /* index of the tab being renamed */
     GfxD2D* gfx;        /* Direct2D chrome renderer; lazy-created in WM_PAINT */
     size_t last_caret_para;   /* start offset of the paragraph last revealed */
+    struct { LONG a, b; char url[512]; } links[256];
+    int   nlinks;
 } NoteWin;
 
 static HMODULE g_richedit = NULL;
@@ -538,8 +542,11 @@ static void nw_fmt_range(HWND edit, size_t start, size_t len, MdFmt fmt) {
     CHARRANGE r = { (LONG)start, (LONG)(start + len) };
     SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&r);
     CHARFORMAT2W cf; memset(&cf, 0, sizeof cf); cf.cbSize = sizeof cf;
-    cf.dwMask = CFM_BOLD|CFM_ITALIC|CFM_STRIKEOUT|CFM_SIZE|CFM_FACE|CFM_COLOR|CFM_HIDDEN;
+    cf.dwMask = CFM_BOLD|CFM_ITALIC|CFM_STRIKEOUT|CFM_SIZE|CFM_FACE|CFM_COLOR|CFM_HIDDEN|CFM_BACKCOLOR|CFM_LINK|CFM_UNDERLINE;
     cf.crTextColor = COL_TEXT;
+    cf.crBackColor = COL_BG;
+    if (fmt & MD_FMT_CODEBLOCK) cf.crBackColor = COL_CODE_BG;
+    if (fmt & MD_FMT_QUOTE) cf.crTextColor = RGB(0x9a, 0x9a, 0xa2);   /* dim */
     cf.yHeight = 200;
     if (fmt & MD_FMT_H1) cf.yHeight = 360;
     else if (fmt & MD_FMT_H2) cf.yHeight = 300;
@@ -547,6 +554,10 @@ static void nw_fmt_range(HWND edit, size_t start, size_t len, MdFmt fmt) {
     if (fmt & (MD_FMT_BOLD | MD_FMT_H1 | MD_FMT_H2 | MD_FMT_H3)) cf.dwEffects |= CFE_BOLD;
     if (fmt & MD_FMT_ITALIC) cf.dwEffects |= CFE_ITALIC;
     if (fmt & MD_FMT_STRIKE) cf.dwEffects |= CFE_STRIKEOUT;
+    if (fmt & MD_FMT_LINK) {
+        cf.crTextColor = COL_ACCENT;
+        cf.dwEffects |= CFE_LINK | CFE_UNDERLINE;
+    }
     wcscpy(cf.szFaceName, L"IBM Plex Mono");
     SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
 }
@@ -569,18 +580,36 @@ static void nw_para_range(HWND edit, size_t start, size_t len, ParaKind kind) {
         pf.wNumbering = (kind == PARA_NUMBER) ? PFN_ARABIC : PFN_BULLET;
         pf.wNumberingStyle = (kind == PARA_NUMBER) ? PFNS_PERIOD : PFNS_PLAIN;
         pf.wNumberingTab = 280; pf.dxStartIndent = 280; pf.dxOffset = 280;
+    } else if (kind == PARA_QUOTE) {
+        pf.dxStartIndent = 280;                            /* indent, no bullet */
     }
     SendMessageW(edit, EM_SETPARAFORMAT, 0, (LPARAM)&pf);
 }
 
 /* Reset [lo,hi] to base formatting, then apply every decoration intersecting it. */
-static void nw_apply_decos(HWND edit, int len, Deco* d, size_t n, size_t lo, size_t hi) {
+static void nw_apply_decos(NoteWin* nw, HWND edit, const char* buf, int len,
+                           Deco* d, size_t n, size_t lo, size_t hi) {
     if (hi > (size_t)len) hi = (size_t)len;
+    /* The link table always reflects the whole current document (every
+     * DECO_LINK), independent of the scoped [lo,hi] char-format window — so it
+     * never accumulates stale/duplicate entries and matches the tab being
+     * styled. Scoped edits still only re-apply char formats within [lo,hi]. */
+    nw->nlinks = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (d[i].kind != DECO_LINK || nw->nlinks >= 256) continue;
+        size_t ul = d[i].aux_len; if (ul > 511) ul = 511;
+        nw->links[nw->nlinks].a = (LONG)d[i].start;
+        nw->links[nw->nlinks].b = (LONG)(d[i].start + d[i].len);
+        memcpy(nw->links[nw->nlinks].url, buf + d[i].aux_start, ul);
+        nw->links[nw->nlinks].url[ul] = '\0';
+        nw->nlinks++;
+    }
     CHARRANGE base = { (LONG)lo, (LONG)hi };
     SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&base);
     CHARFORMAT2W bf; memset(&bf, 0, sizeof bf); bf.cbSize = sizeof bf;
-    bf.dwMask = CFM_BOLD|CFM_ITALIC|CFM_STRIKEOUT|CFM_SIZE|CFM_FACE|CFM_COLOR|CFM_HIDDEN;
-    bf.yHeight = 200; bf.crTextColor = COL_TEXT; wcscpy(bf.szFaceName, L"IBM Plex Mono");
+    bf.dwMask = CFM_BOLD|CFM_ITALIC|CFM_STRIKEOUT|CFM_SIZE|CFM_FACE|CFM_COLOR|CFM_HIDDEN|CFM_BACKCOLOR|CFM_LINK|CFM_UNDERLINE;
+    bf.yHeight = 200; bf.crTextColor = COL_TEXT; bf.crBackColor = COL_BG;
+    wcscpy(bf.szFaceName, L"IBM Plex Mono");
     SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&bf);
     /* also clear paragraph numbering across the range, so un-listing reverts */
     nw_para_range(edit, lo, hi > lo ? hi - lo : 0, PARA_NONE);
@@ -635,7 +664,7 @@ static void nw_restyle(NoteWin* nw, int tab, int scoped) {
 
     Deco* d = NULL;
     size_t n = markdown_decorate(buf, (size_t)len, sel_lo, sel_hi, &d);
-    nw_apply_decos(edit, len, d, n, lo, hi);
+    nw_apply_decos(nw, edit, buf, len, d, n, lo, hi);
     free(d);
     free(buf);
 
@@ -910,6 +939,7 @@ static void nw_activate(NoteWin* nw, HWND hwnd, int i) {
     ShowWindow(nw->tab[nw->active].edit, SW_HIDE);
     nw->active = i;
     ShowWindow(nw->tab[i].edit, SW_SHOW);
+    nw_apply_format_edit(nw, i);   /* rebuild link table for the now-active tab */
     nw_sync_winmeta(nw);
     InvalidateRect(hwnd, NULL, TRUE);
     SetFocus(nw->tab[i].edit);
@@ -1175,6 +1205,16 @@ static void nw_paint_chrome(NoteWin* nw, HWND hwnd) {
     nw_paint_tabs(nw, hwnd);
 }
 
+/* Open http/https/mailto URLs only; reject everything else. */
+static void nw_open_url(const char* url) {
+    if (!( _strnicmp(url, "http://", 7) == 0 ||
+           _strnicmp(url, "https://", 8) == 0 ||
+           _strnicmp(url, "mailto:", 7) == 0 )) return;
+    wchar_t wurl[1024];
+    if (MultiByteToWideChar(CP_ACP, 0, url, -1, wurl, 1024) == 0) return;
+    ShellExecuteW(NULL, L"open", wurl, NULL, NULL, SW_SHOWNORMAL);
+}
+
 static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     NoteWin* nw = nw_get(hwnd);
     switch (msg) {
@@ -1230,6 +1270,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             nw_load_tab(nw, i);
             nw_apply_format_edit(nw, i);    /* style each loaded body */
         }
+        if (nw->ntabs > 0) nw_apply_format_edit(nw, nw->active);
         nw_layout(hwnd, nw);
         nw_update_toggles(nw);
         if (nw_edit(nw)) SetFocus(nw_edit(nw));
@@ -1261,6 +1302,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 SendMessageW(nw->tab[i].edit, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
                 nw_apply_format_edit(nw, i);
             }
+            if (nw->ntabs > 0) nw_apply_format_edit(nw, nw->active);
             nw_layout(hwnd, nw);
             InvalidateRect(hwnd, NULL, TRUE);
         }
@@ -1479,6 +1521,18 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
             }
             nw_update_toggles(nw);
+            return 0;
+        }
+        if (nw && hdr->code == EN_LINK && hdr->idFrom == ID_EDIT) {
+            ENLINK* el = (ENLINK*)lp;
+            if (el->msg == WM_LBUTTONUP && (GetKeyState(VK_CONTROL) & 0x8000)) {
+                for (int i = 0; i < nw->nlinks; i++)
+                    if (el->chrg.cpMin >= nw->links[i].a && el->chrg.cpMin < nw->links[i].b) {
+                        nw_open_url(nw->links[i].url);
+                        break;
+                    }
+                return 1;
+            }
             return 0;
         }
         if (nw && hdr->code == EN_MSGFILTER && hdr->idFrom == ID_EDIT) {

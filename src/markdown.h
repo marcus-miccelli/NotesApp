@@ -10,9 +10,12 @@ typedef unsigned MdFmt;
 #define MD_FMT_H2     (1u<<4)
 #define MD_FMT_H3     (1u<<5)
 #define MD_FMT_STRIKE (1u<<6)
+#define MD_FMT_CODEBLOCK (1u<<7)
+#define MD_FMT_QUOTE (1u<<8)
+#define MD_FMT_LINK (1u<<9)
 
-typedef enum { DECO_FMT, DECO_HIDE, DECO_PARA } DecoKind;
-typedef enum { PARA_NONE, PARA_BULLET, PARA_NUMBER } ParaKind;
+typedef enum { DECO_FMT, DECO_HIDE, DECO_PARA, DECO_LINK } DecoKind;
+typedef enum { PARA_NONE, PARA_BULLET, PARA_NUMBER, PARA_QUOTE } ParaKind;
 
 typedef struct {
     DecoKind kind;
@@ -21,6 +24,8 @@ typedef struct {
     MdFmt    fmt;     /* DECO_FMT */
     ParaKind para;    /* DECO_PARA */
     int      number;  /* DECO_PARA + PARA_NUMBER: ordinal */
+    size_t   aux_start; /* DECO_LINK: url source span start */
+    size_t   aux_len;   /* DECO_LINK: url source span length */
 } Deco;
 
 /* Build the full-document decoration list. Markers hide everywhere except the

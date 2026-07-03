@@ -14,6 +14,13 @@ typedef struct {
     int    in_heading;
     int    h_first_text;
     MdFmt  h_fmt;
+    /* code block state */
+    int    in_code;
+    int    code_first_text;
+    size_t code_content_start;
+    /* quote block state */
+    int    in_quote;
+    int    quote_first_text;
     /* inline span stack */
     struct { MdFmt fmt; int marklen; int start_set; } sp[64];
     int    depth;
@@ -25,6 +32,13 @@ typedef struct {
     int      listnum;      /* next ordinal for ordered lists */
     int      in_li;
     int      li_first_text;
+    int    li_is_task;
+    int    li_task_checked;
+    size_t li_task_mark_off;    /* source offset of the mark char between [ ] */
+    /* link state */
+    int    in_a;
+    int    a_text_set;
+    size_t a_text_start;
     /* reveal window */
     size_t sel_lo, sel_hi;   /* reveal window; lo>hi = hide all */
 } DCtx;
@@ -52,6 +66,15 @@ static void push(DCtx* c, DecoKind k, size_t start, size_t len,
     Deco* d = &c->arr[c->count++];
     d->kind = k; d->start = start; d->len = len;
     d->fmt = fmt; d->para = para; d->number = number;
+    d->aux_start = 0; d->aux_len = 0;
+}
+
+static void push_link(DCtx* c, size_t start, size_t len, size_t url_start, size_t url_len) {
+    push(c, DECO_LINK, start, len, MD_FMT_LINK, PARA_NONE, 0);
+    if (c->count > 0) {
+        Deco* d = &c->arr[c->count - 1];
+        d->aux_start = url_start; d->aux_len = url_len;
+    }
 }
 
 static void push_hide(DCtx* c, size_t start, size_t len) {
@@ -75,7 +98,15 @@ static int d_enter_block(MD_BLOCKTYPE t, void* detail, void* ud) {
         MD_BLOCK_OL_DETAIL* d = (MD_BLOCK_OL_DETAIL*)detail;
         c->listkind = PARA_NUMBER; c->listnum = (int)d->start;
     }
-    if (t == MD_BLOCK_LI) { c->in_li = 1; c->li_first_text = 0; }
+    if (t == MD_BLOCK_LI) {
+        MD_BLOCK_LI_DETAIL* d = (MD_BLOCK_LI_DETAIL*)detail;
+        c->in_li = 1; c->li_first_text = 0;
+        c->li_is_task = d->is_task;
+        c->li_task_checked = d->is_task && (d->task_mark == 'x' || d->task_mark == 'X');
+        c->li_task_mark_off = (size_t)d->task_mark_offset;
+    }
+    if (t == MD_BLOCK_CODE) { c->in_code = 1; c->code_first_text = 0; }
+    if (t == MD_BLOCK_QUOTE) { c->in_quote = 1; c->quote_first_text = 0; }
     return 0;
 }
 static int d_leave_block(MD_BLOCKTYPE t, void* detail, void* ud) {
@@ -86,6 +117,27 @@ static int d_leave_block(MD_BLOCKTYPE t, void* detail, void* ud) {
         if (c->listkind == PARA_NUMBER) c->listnum++;
     }
     if (t == MD_BLOCK_UL || t == MD_BLOCK_OL) c->listkind = PARA_NONE;
+    if (t == MD_BLOCK_CODE) {
+        if (c->code_first_text) {
+            size_t ce = c->last_text_end;
+            /* Skip any CR/LF after the code content, but only if within bounds */
+            if (ce < c->len && c->base[ce] == '\r') ce++;
+            if (ce < c->len && c->base[ce] == '\n') ce++;  /* closing fence line start */
+            /* One contiguous shaded range over the whole block body (incl. the
+             * newlines between code lines) so the background is not striped. */
+            if (ce > c->code_content_start)
+                push(c, DECO_FMT, c->code_content_start, ce - c->code_content_start,
+                     MD_FMT_CODEBLOCK, PARA_NONE, 0);
+            if (ce < c->len) {
+                size_t fe = ce;
+                while (fe < c->len && c->base[fe] != '\n' && c->base[fe] != '\r') fe++;
+                if (fe > ce) push_hide(c, ce, fe - ce);
+            }
+        }
+        c->in_code = 0;
+        c->code_first_text = 0;
+    }
+    if (t == MD_BLOCK_QUOTE) c->in_quote = 0;
     return 0;
 }
 static MdFmt span_fmt(MD_SPANTYPE t) {
@@ -102,6 +154,7 @@ static int span_marklen(MD_SPANTYPE t) {
 }
 static int d_enter_span(MD_SPANTYPE t, void* detail, void* ud) {
     (void)detail; DCtx* c = (DCtx*)ud;
+    if (t == MD_SPAN_A) { c->in_a = 1; c->a_text_set = 0; return 0; }
     if (!span_fmt(t)) return 0;
     if (c->depth >= 64) { c->over++; return 0; }   /* dropped; balance on leave */
     c->sp[c->depth].fmt = span_fmt(t);
@@ -112,6 +165,29 @@ static int d_enter_span(MD_SPANTYPE t, void* detail, void* ud) {
 }
 static int d_leave_span(MD_SPANTYPE t, void* detail, void* ud) {
     (void)detail; DCtx* c = (DCtx*)ud;
+    if (t == MD_SPAN_A) {
+        /* End of visible link text. Use the same close-cursor-aware anchor as
+         * emphasis closes so nested/trailing inline markup (e.g. "[**b**](url)")
+         * is accounted for — raw last_text_end stops before the inner close. */
+        size_t te = c->last_text_end > c->close_cursor ? c->last_text_end
+                                                       : c->close_cursor;
+        /* Only handle inline links "](...)"; leave reference/shortcut links
+         * ("[t][ref]", "[t]") untouched rather than mis-scanning the line. */
+        if (te + 1 < c->len && c->base[te] == ']' && c->base[te+1] == '(') {
+            size_t p = te + 2;                  /* past "](" */
+            size_t url_start = p;
+            while (p < c->len && c->base[p] != ')' && c->base[p] != ' ' &&
+                   c->base[p] != '\t' && c->base[p] != '\n') p++;
+            size_t url_len = p - url_start;
+            while (p < c->len && c->base[p] != ')' && c->base[p] != '\n') p++;  /* skip title */
+            if (p < c->len && c->base[p] == ')') p++;                            /* include ')' */
+            push_hide(c, te, p - te);           /* hide "](url...)" */
+            if (c->a_text_set)
+                push_link(c, c->a_text_start, te - c->a_text_start, url_start, url_len);
+        }
+        c->in_a = 0;
+        return 0;
+    }
     if (!span_fmt(t)) return 0;
     if (c->over > 0) { c->over--; return 0; }       /* unwind a dropped open */
     if (c->depth <= 0) return 0;
@@ -126,6 +202,22 @@ static int d_leave_span(MD_SPANTYPE t, void* detail, void* ud) {
 static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
     (void)tt; DCtx* c = (DCtx*)ud;
     size_t off = (size_t)(text - c->base);
+
+    if (c->in_code) {
+        if (!c->code_first_text && off < c->len) {
+            c->code_first_text = 1;
+            c->code_content_start = off;
+            size_t p = off;                                 /* hide opening fence line */
+            if (p > 0 && c->base[p-1] == '\n') p--;
+            if (p > 0 && c->base[p-1] == '\r') p--;
+            size_t fs = p;
+            while (fs > 0 && c->base[fs-1] != '\n' && c->base[fs-1] != '\r') fs--;
+            push_hide(c, fs, off - fs);
+        }
+        if (off + (size_t)size <= c->len)
+            c->last_text_end = off + (size_t)size;
+        return 0;
+    }
 
     /* resolve opening markers for spans opened since the last text run,
      * innermost first, consuming delimiter chars leftward from off. */
@@ -144,11 +236,28 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
         c->sp[i].start_set = 1;
     }
 
+    if (c->in_a && !c->a_text_set) {
+        c->a_text_set = 1;
+        c->a_text_start = off;
+        size_t ab = off;                       /* scan left to the '[' */
+        while (ab > 0 && c->base[ab-1] != '[') ab--;
+        if (ab > 0) push_hide(c, ab - 1, 1);   /* hide '[' */
+    }
+
     if (c->in_li && !c->li_first_text) {
         c->li_first_text = 1;
         size_t ls = off;
         while (ls > 0 && c->base[ls-1] != '\n' && c->base[ls-1] != '\r') ls--;
-        push_hide(c, ls, off - ls);           /* "- "/"N. " */
+        if (c->li_is_task) {
+            /* keep "[x]" visible: hide "- " before it and the run after it up to
+             * the content; the mark char sits at li_task_mark_off (between [ ]). */
+            size_t cb0 = c->li_task_mark_off > 0 ? c->li_task_mark_off - 1 : 0; /* '[' */
+            size_t cb1 = c->li_task_mark_off + 2;                               /* past ']' */
+            push_hide(c, ls, cb0 - ls);        /* "- " */
+            if (off > cb1) push_hide(c, cb1, off - cb1);   /* space(s) after "]" */
+        } else {
+            push_hide(c, ls, off - ls);        /* "- "/"N. " */
+        }
         push(c, DECO_PARA, ls, (off - ls) + (size_t)size,
              0, c->listkind,
              c->listkind == PARA_NUMBER ? c->listnum : 0);
@@ -156,6 +265,8 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
 
     MdFmt f = 0;
     for (int i = 0; i < c->depth; i++) f |= c->sp[i].fmt;
+    if (c->in_li && c->li_task_checked) f |= MD_FMT_STRIKE;
+    if (c->in_a) f |= MD_FMT_LINK;
     if (c->in_heading) {
         if (!c->h_first_text) {
             c->h_first_text = 1;
@@ -164,6 +275,16 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
             push_hide(c, ls, off - ls);
         }
         f |= c->h_fmt;
+    }
+    if (c->in_quote) {
+        if (!c->quote_first_text) {
+            c->quote_first_text = 1;
+            size_t ls = off;
+            while (ls > 0 && c->base[ls-1] != '\n' && c->base[ls-1] != '\r') ls--;
+            push_hide(c, ls, off - ls);                    /* "> " */
+            push(c, DECO_PARA, ls, (off - ls) + (size_t)size, 0, PARA_QUOTE, 0);
+        }
+        f |= MD_FMT_QUOTE;
     }
     if (f) push(c, DECO_FMT, off, (size_t)size, f, PARA_NONE, 0);
     c->last_text_end = off + (size_t)size;
@@ -177,7 +298,7 @@ size_t markdown_decorate(const char* text, size_t len,
     c.sel_lo = sel_lo; c.sel_hi = sel_hi;
     MD_PARSER p; memset(&p, 0, sizeof p);
     p.abi_version = 0;
-    p.flags = MD_DIALECT_COMMONMARK | MD_FLAG_STRIKETHROUGH;
+    p.flags = MD_DIALECT_COMMONMARK | MD_FLAG_STRIKETHROUGH | MD_FLAG_TASKLISTS;
     p.enter_block = d_enter_block;
     p.leave_block = d_leave_block;
     p.text        = d_text;
