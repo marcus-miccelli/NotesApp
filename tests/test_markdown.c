@@ -149,4 +149,17 @@ void test_markdown(void) {
         CHECK(hides >= 2);     /* opening + closing fences hidden */
         free(d);
     }
+
+    /* --- multi-line code block: shaded range is contiguous (covers the \n) --- */
+    {
+        const char* t = "```\na\nb\n```";   /* a at 4, \n at 5, b at 6 */
+        Deco* d = NULL; size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d);
+        int contiguous = 0;
+        for (size_t i = 0; i < n; i++)
+            if (d[i].kind == DECO_FMT && (d[i].fmt & MD_FMT_CODEBLOCK) &&
+                d[i].start <= 4 && d[i].start + d[i].len >= 7)  /* covers a, \n, b */
+                contiguous = 1;
+        CHECK(contiguous == 1);
+        free(d);
+    }
 }
