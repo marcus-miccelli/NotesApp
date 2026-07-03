@@ -24,8 +24,8 @@ typedef struct {
     MdFmt    fmt;     /* DECO_FMT */
     ParaKind para;    /* DECO_PARA */
     int      number;  /* DECO_PARA + PARA_NUMBER: ordinal */
-    size_t   aux_start; /* DECO_LINK: url source span start */
-    size_t   aux_len;   /* DECO_LINK: url source span length */
+    size_t   aux_start; /* DECO_LINK: url offset into the parse's url pool */
+    size_t   aux_len;   /* DECO_LINK: url length in the url pool */
 } Deco;
 
 /* Build the full-document decoration list. Markers hide everywhere except the

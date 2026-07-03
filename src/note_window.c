@@ -587,9 +587,8 @@ static void nw_para_range(HWND edit, size_t start, size_t len, ParaKind kind) {
 }
 
 /* Reset [lo,hi] to base formatting, then apply every decoration intersecting it. */
-static void nw_apply_decos(NoteWin* nw, HWND edit, const char* buf, const char* urlpool,
+static void nw_apply_decos(NoteWin* nw, HWND edit, const char* urlpool,
                            int len, Deco* d, size_t n, size_t lo, size_t hi) {
-    (void)buf;   /* url source is now urlpool; buf kept for signature symmetry */
     if (hi > (size_t)len) hi = (size_t)len;
     /* The link table always reflects the whole current document (every
      * DECO_LINK), independent of the scoped [lo,hi] char-format window — so it
@@ -665,7 +664,7 @@ static void nw_restyle(NoteWin* nw, int tab, int scoped) {
 
     Deco* d = NULL; char* pool = NULL;
     size_t n = markdown_decorate(buf, (size_t)len, sel_lo, sel_hi, &d, &pool);
-    nw_apply_decos(nw, edit, buf, pool, len, d, n, lo, hi);
+    nw_apply_decos(nw, edit, pool, len, d, n, lo, hi);
     free(d);
     free(pool);
     free(buf);
