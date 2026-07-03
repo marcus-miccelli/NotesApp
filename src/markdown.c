@@ -118,19 +118,21 @@ static int d_leave_block(MD_BLOCKTYPE t, void* detail, void* ud) {
     }
     if (t == MD_BLOCK_UL || t == MD_BLOCK_OL) c->listkind = PARA_NONE;
     if (t == MD_BLOCK_CODE) {
-        size_t ce = c->last_text_end;
-        /* Skip any CR/LF after the code content, but only if within bounds */
-        if (ce < c->len && c->base[ce] == '\r') ce++;
-        if (ce < c->len && c->base[ce] == '\n') ce++;      /* closing fence line start */
-        /* One contiguous shaded range over the whole block body (incl. the
-         * newlines between code lines) so the background is not striped. */
-        if (c->code_first_text && ce > c->code_content_start)
-            push(c, DECO_FMT, c->code_content_start, ce - c->code_content_start,
-                 MD_FMT_CODEBLOCK, PARA_NONE, 0);
-        if (ce < c->len) {
-            size_t fe = ce;
-            while (fe < c->len && c->base[fe] != '\n' && c->base[fe] != '\r') fe++;
-            if (fe > ce) push_hide(c, ce, fe - ce);
+        if (c->code_first_text) {
+            size_t ce = c->last_text_end;
+            /* Skip any CR/LF after the code content, but only if within bounds */
+            if (ce < c->len && c->base[ce] == '\r') ce++;
+            if (ce < c->len && c->base[ce] == '\n') ce++;  /* closing fence line start */
+            /* One contiguous shaded range over the whole block body (incl. the
+             * newlines between code lines) so the background is not striped. */
+            if (ce > c->code_content_start)
+                push(c, DECO_FMT, c->code_content_start, ce - c->code_content_start,
+                     MD_FMT_CODEBLOCK, PARA_NONE, 0);
+            if (ce < c->len) {
+                size_t fe = ce;
+                while (fe < c->len && c->base[fe] != '\n' && c->base[fe] != '\r') fe++;
+                if (fe > ce) push_hide(c, ce, fe - ce);
+            }
         }
         c->in_code = 0;
         c->code_first_text = 0;

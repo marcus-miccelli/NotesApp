@@ -179,6 +179,12 @@ void test_markdown(void) {
         CHECK(bullets == 2);        /* both items are bullets */
         CHECK(struck == 1);         /* the checked item strikes its content */
         CHECK(checkbox_visible == 1); /* "[ ]" stays visible */
+        int todo_struck = 0;
+        for (size_t i = 0; i < n; i++)
+            if (d[i].kind == DECO_FMT && (d[i].fmt & MD_FMT_STRIKE) &&
+                d[i].start <= 6 && d[i].start + d[i].len > 6)
+                todo_struck = 1;
+        CHECK(todo_struck == 0);   /* unchecked item is NOT struck */
         free(d);
     }
 

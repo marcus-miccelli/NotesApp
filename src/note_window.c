@@ -590,7 +590,20 @@ static void nw_para_range(HWND edit, size_t start, size_t len, ParaKind kind) {
 static void nw_apply_decos(NoteWin* nw, HWND edit, const char* buf, int len,
                            Deco* d, size_t n, size_t lo, size_t hi) {
     if (hi > (size_t)len) hi = (size_t)len;
-    if (lo == 0 && hi >= (size_t)len) nw->nlinks = 0;   /* rebuild on full restyle */
+    /* The link table always reflects the whole current document (every
+     * DECO_LINK), independent of the scoped [lo,hi] char-format window — so it
+     * never accumulates stale/duplicate entries and matches the tab being
+     * styled. Scoped edits still only re-apply char formats within [lo,hi]. */
+    nw->nlinks = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (d[i].kind != DECO_LINK || nw->nlinks >= 256) continue;
+        size_t ul = d[i].aux_len; if (ul > 511) ul = 511;
+        nw->links[nw->nlinks].a = (LONG)d[i].start;
+        nw->links[nw->nlinks].b = (LONG)(d[i].start + d[i].len);
+        memcpy(nw->links[nw->nlinks].url, buf + d[i].aux_start, ul);
+        nw->links[nw->nlinks].url[ul] = '\0';
+        nw->nlinks++;
+    }
     CHARRANGE base = { (LONG)lo, (LONG)hi };
     SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&base);
     CHARFORMAT2W bf; memset(&bf, 0, sizeof bf); bf.cbSize = sizeof bf;
@@ -607,16 +620,6 @@ static void nw_apply_decos(NoteWin* nw, HWND edit, const char* buf, int len,
         if (d[i].kind == DECO_FMT)  nw_fmt_range(edit, a, d[i].len, d[i].fmt);
         else if (d[i].kind == DECO_HIDE) nw_hide_range2(edit, a, d[i].len);
         else if (d[i].kind == DECO_PARA) nw_para_range(edit, a, d[i].len, d[i].para);
-        else if (d[i].kind == DECO_LINK) {
-            if (nw->nlinks < 256) {
-                size_t ul = d[i].aux_len; if (ul > 511) ul = 511;
-                nw->links[nw->nlinks].a = (LONG)a;
-                nw->links[nw->nlinks].b = (LONG)b;
-                memcpy(nw->links[nw->nlinks].url, buf + d[i].aux_start, ul);
-                nw->links[nw->nlinks].url[ul] = '\0';
-                nw->nlinks++;
-            }
-        }
     }
 }
 
@@ -936,6 +939,7 @@ static void nw_activate(NoteWin* nw, HWND hwnd, int i) {
     ShowWindow(nw->tab[nw->active].edit, SW_HIDE);
     nw->active = i;
     ShowWindow(nw->tab[i].edit, SW_SHOW);
+    nw_apply_format_edit(nw, i);   /* rebuild link table for the now-active tab */
     nw_sync_winmeta(nw);
     InvalidateRect(hwnd, NULL, TRUE);
     SetFocus(nw->tab[i].edit);
@@ -1266,6 +1270,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             nw_load_tab(nw, i);
             nw_apply_format_edit(nw, i);    /* style each loaded body */
         }
+        if (nw->ntabs > 0) nw_apply_format_edit(nw, nw->active);
         nw_layout(hwnd, nw);
         nw_update_toggles(nw);
         if (nw_edit(nw)) SetFocus(nw_edit(nw));
@@ -1297,6 +1302,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 SendMessageW(nw->tab[i].edit, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
                 nw_apply_format_edit(nw, i);
             }
+            if (nw->ntabs > 0) nw_apply_format_edit(nw, nw->active);
             nw_layout(hwnd, nw);
             InvalidateRect(hwnd, NULL, TRUE);
         }
