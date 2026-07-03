@@ -35,6 +35,10 @@ typedef struct {
     int    li_is_task;
     int    li_task_checked;
     size_t li_task_mark_off;    /* source offset of the mark char between [ ] */
+    /* link state */
+    int    in_a;
+    int    a_text_set;
+    size_t a_text_start;
     /* reveal window */
     size_t sel_lo, sel_hi;   /* reveal window; lo>hi = hide all */
 } DCtx;
@@ -62,6 +66,15 @@ static void push(DCtx* c, DecoKind k, size_t start, size_t len,
     Deco* d = &c->arr[c->count++];
     d->kind = k; d->start = start; d->len = len;
     d->fmt = fmt; d->para = para; d->number = number;
+    d->aux_start = 0; d->aux_len = 0;
+}
+
+static void push_link(DCtx* c, size_t start, size_t len, size_t url_start, size_t url_len) {
+    push(c, DECO_LINK, start, len, MD_FMT_LINK, PARA_NONE, 0);
+    if (c->count > 0) {
+        Deco* d = &c->arr[c->count - 1];
+        d->aux_start = url_start; d->aux_len = url_len;
+    }
 }
 
 static void push_hide(DCtx* c, size_t start, size_t len) {
@@ -139,6 +152,7 @@ static int span_marklen(MD_SPANTYPE t) {
 }
 static int d_enter_span(MD_SPANTYPE t, void* detail, void* ud) {
     (void)detail; DCtx* c = (DCtx*)ud;
+    if (t == MD_SPAN_A) { c->in_a = 1; c->a_text_set = 0; return 0; }
     if (!span_fmt(t)) return 0;
     if (c->depth >= 64) { c->over++; return 0; }   /* dropped; balance on leave */
     c->sp[c->depth].fmt = span_fmt(t);
@@ -149,6 +163,23 @@ static int d_enter_span(MD_SPANTYPE t, void* detail, void* ud) {
 }
 static int d_leave_span(MD_SPANTYPE t, void* detail, void* ud) {
     (void)detail; DCtx* c = (DCtx*)ud;
+    if (t == MD_SPAN_A) {
+        size_t te = c->last_text_end;          /* end of visible link text */
+        size_t p = te;
+        if (p < c->len && c->base[p] == ']') p++;
+        if (p < c->len && c->base[p] == '(') p++;
+        size_t url_start = p;
+        while (p < c->len && c->base[p] != ')' && c->base[p] != ' ' &&
+               c->base[p] != '\t' && c->base[p] != '\n') p++;
+        size_t url_len = p - url_start;
+        while (p < c->len && c->base[p] != ')' && c->base[p] != '\n') p++;  /* skip title */
+        if (p < c->len && c->base[p] == ')') p++;                            /* include ')' */
+        push_hide(c, te, p - te);              /* hide "](url...)" */
+        if (c->a_text_set)
+            push_link(c, c->a_text_start, te - c->a_text_start, url_start, url_len);
+        c->in_a = 0;
+        return 0;
+    }
     if (!span_fmt(t)) return 0;
     if (c->over > 0) { c->over--; return 0; }       /* unwind a dropped open */
     if (c->depth <= 0) return 0;
@@ -197,6 +228,14 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
         c->sp[i].start_set = 1;
     }
 
+    if (c->in_a && !c->a_text_set) {
+        c->a_text_set = 1;
+        c->a_text_start = off;
+        size_t ab = off;                       /* scan left to the '[' */
+        while (ab > 0 && c->base[ab-1] != '[') ab--;
+        if (ab > 0) push_hide(c, ab - 1, 1);   /* hide '[' */
+    }
+
     if (c->in_li && !c->li_first_text) {
         c->li_first_text = 1;
         size_t ls = off;
@@ -219,6 +258,7 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
     MdFmt f = 0;
     for (int i = 0; i < c->depth; i++) f |= c->sp[i].fmt;
     if (c->in_li && c->li_task_checked) f |= MD_FMT_STRIKE;
+    if (c->in_a) f |= MD_FMT_LINK;
     if (c->in_heading) {
         if (!c->h_first_text) {
             c->h_first_text = 1;

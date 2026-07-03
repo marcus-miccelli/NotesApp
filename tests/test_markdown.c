@@ -197,4 +197,25 @@ void test_markdown(void) {
         CHECK(hidmark == 1);   /* "> " hidden */
         free(d);
     }
+
+    /* --- link --- */
+    {
+        const char* t = "[go](http://x)";  /* text 1..3, url 5..13 */
+        Deco* d = NULL; size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d);
+        int linkfmt = 0, linkdeco = 0, hidopen = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (d[i].kind == DECO_FMT && (d[i].fmt & MD_FMT_LINK)) linkfmt = 1;
+            if (d[i].kind == DECO_LINK) {
+                linkdeco = 1;
+                CHECK(d[i].start == 1 && d[i].len == 2);        /* "go" */
+                CHECK(strncmp(t + d[i].aux_start, "http://x", 8) == 0);
+                CHECK(d[i].aux_len == 8);
+            }
+            if (d[i].kind == DECO_HIDE && d[i].start == 0 && d[i].len == 1) hidopen = 1;
+        }
+        CHECK(linkfmt == 1);
+        CHECK(linkdeco == 1);
+        CHECK(hidopen == 1);   /* "[" hidden */
+        free(d);
+    }
 }
