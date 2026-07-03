@@ -18,6 +18,9 @@ typedef struct {
     int    in_code;
     int    code_first_text;
     size_t code_content_start;
+    /* quote block state */
+    int    in_quote;
+    int    quote_first_text;
     /* inline span stack */
     struct { MdFmt fmt; int marklen; int start_set; } sp[64];
     int    depth;
@@ -81,6 +84,7 @@ static int d_enter_block(MD_BLOCKTYPE t, void* detail, void* ud) {
     }
     if (t == MD_BLOCK_LI) { c->in_li = 1; c->li_first_text = 0; }
     if (t == MD_BLOCK_CODE) { c->in_code = 1; c->code_first_text = 0; }
+    if (t == MD_BLOCK_QUOTE) { c->in_quote = 1; c->quote_first_text = 0; }
     return 0;
 }
 static int d_leave_block(MD_BLOCKTYPE t, void* detail, void* ud) {
@@ -109,6 +113,7 @@ static int d_leave_block(MD_BLOCKTYPE t, void* detail, void* ud) {
         c->in_code = 0;
         c->code_first_text = 0;
     }
+    if (t == MD_BLOCK_QUOTE) c->in_quote = 0;
     return 0;
 }
 static MdFmt span_fmt(MD_SPANTYPE t) {
@@ -203,6 +208,16 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
             push_hide(c, ls, off - ls);
         }
         f |= c->h_fmt;
+    }
+    if (c->in_quote) {
+        if (!c->quote_first_text) {
+            c->quote_first_text = 1;
+            size_t ls = off;
+            while (ls > 0 && c->base[ls-1] != '\n' && c->base[ls-1] != '\r') ls--;
+            push_hide(c, ls, off - ls);                    /* "> " */
+            push(c, DECO_PARA, ls, (off - ls) + (size_t)size, 0, PARA_QUOTE, 0);
+        }
+        f |= MD_FMT_QUOTE;
     }
     if (f) push(c, DECO_FMT, off, (size_t)size, f, PARA_NONE, 0);
     c->last_text_end = off + (size_t)size;

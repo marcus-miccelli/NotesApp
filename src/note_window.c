@@ -543,6 +543,7 @@ static void nw_fmt_range(HWND edit, size_t start, size_t len, MdFmt fmt) {
     cf.crTextColor = COL_TEXT;
     cf.crBackColor = COL_BG;
     if (fmt & MD_FMT_CODEBLOCK) cf.crBackColor = COL_CODE_BG;
+    if (fmt & MD_FMT_QUOTE) cf.crTextColor = RGB(0x9a, 0x9a, 0xa2);   /* dim */
     cf.yHeight = 200;
     if (fmt & MD_FMT_H1) cf.yHeight = 360;
     else if (fmt & MD_FMT_H2) cf.yHeight = 300;
@@ -572,6 +573,8 @@ static void nw_para_range(HWND edit, size_t start, size_t len, ParaKind kind) {
         pf.wNumbering = (kind == PARA_NUMBER) ? PFN_ARABIC : PFN_BULLET;
         pf.wNumberingStyle = (kind == PARA_NUMBER) ? PFNS_PERIOD : PFNS_PLAIN;
         pf.wNumberingTab = 280; pf.dxStartIndent = 280; pf.dxOffset = 280;
+    } else if (kind == PARA_QUOTE) {
+        pf.dxStartIndent = 280;                            /* indent, no bullet */
     }
     SendMessageW(edit, EM_SETPARAFORMAT, 0, (LPARAM)&pf);
 }

@@ -11,9 +11,10 @@ typedef unsigned MdFmt;
 #define MD_FMT_H3     (1u<<5)
 #define MD_FMT_STRIKE (1u<<6)
 #define MD_FMT_CODEBLOCK (1u<<7)
+#define MD_FMT_QUOTE (1u<<8)
 
 typedef enum { DECO_FMT, DECO_HIDE, DECO_PARA } DecoKind;
-typedef enum { PARA_NONE, PARA_BULLET, PARA_NUMBER } ParaKind;
+typedef enum { PARA_NONE, PARA_BULLET, PARA_NUMBER, PARA_QUOTE } ParaKind;
 
 typedef struct {
     DecoKind kind;

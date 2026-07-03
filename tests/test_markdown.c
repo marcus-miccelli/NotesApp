@@ -162,4 +162,20 @@ void test_markdown(void) {
         CHECK(contiguous == 1);
         free(d);
     }
+
+    /* --- blockquote --- */
+    {
+        const char* t = "> quoted";
+        Deco* d = NULL; size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d);
+        int qfmt = 0, qpara = 0, hidmark = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (d[i].kind == DECO_FMT && (d[i].fmt & MD_FMT_QUOTE)) qfmt = 1;
+            if (d[i].kind == DECO_PARA && d[i].para == PARA_QUOTE) qpara = 1;
+            if (d[i].kind == DECO_HIDE && d[i].start == 0 && d[i].len == 2) hidmark = 1;
+        }
+        CHECK(qfmt == 1);
+        CHECK(qpara == 1);
+        CHECK(hidmark == 1);   /* "> " hidden */
+        free(d);
+    }
 }
