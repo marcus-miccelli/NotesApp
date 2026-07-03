@@ -164,19 +164,25 @@ static int d_enter_span(MD_SPANTYPE t, void* detail, void* ud) {
 static int d_leave_span(MD_SPANTYPE t, void* detail, void* ud) {
     (void)detail; DCtx* c = (DCtx*)ud;
     if (t == MD_SPAN_A) {
-        size_t te = c->last_text_end;          /* end of visible link text */
-        size_t p = te;
-        if (p < c->len && c->base[p] == ']') p++;
-        if (p < c->len && c->base[p] == '(') p++;
-        size_t url_start = p;
-        while (p < c->len && c->base[p] != ')' && c->base[p] != ' ' &&
-               c->base[p] != '\t' && c->base[p] != '\n') p++;
-        size_t url_len = p - url_start;
-        while (p < c->len && c->base[p] != ')' && c->base[p] != '\n') p++;  /* skip title */
-        if (p < c->len && c->base[p] == ')') p++;                            /* include ')' */
-        push_hide(c, te, p - te);              /* hide "](url...)" */
-        if (c->a_text_set)
-            push_link(c, c->a_text_start, te - c->a_text_start, url_start, url_len);
+        /* End of visible link text. Use the same close-cursor-aware anchor as
+         * emphasis closes so nested/trailing inline markup (e.g. "[**b**](url)")
+         * is accounted for — raw last_text_end stops before the inner close. */
+        size_t te = c->last_text_end > c->close_cursor ? c->last_text_end
+                                                       : c->close_cursor;
+        /* Only handle inline links "](...)"; leave reference/shortcut links
+         * ("[t][ref]", "[t]") untouched rather than mis-scanning the line. */
+        if (te + 1 < c->len && c->base[te] == ']' && c->base[te+1] == '(') {
+            size_t p = te + 2;                  /* past "](" */
+            size_t url_start = p;
+            while (p < c->len && c->base[p] != ')' && c->base[p] != ' ' &&
+                   c->base[p] != '\t' && c->base[p] != '\n') p++;
+            size_t url_len = p - url_start;
+            while (p < c->len && c->base[p] != ')' && c->base[p] != '\n') p++;  /* skip title */
+            if (p < c->len && c->base[p] == ')') p++;                            /* include ')' */
+            push_hide(c, te, p - te);           /* hide "](url...)" */
+            if (c->a_text_set)
+                push_link(c, c->a_text_start, te - c->a_text_start, url_start, url_len);
+        }
         c->in_a = 0;
         return 0;
     }

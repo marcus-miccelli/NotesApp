@@ -218,4 +218,16 @@ void test_markdown(void) {
         CHECK(hidopen == 1);   /* "[" hidden */
         free(d);
     }
+
+    {   /* link text with nested emphasis: url span still correct */
+        const char* t = "[**b**](http://x)";
+        Deco* d = NULL; size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d);
+        int ok = 0;
+        for (size_t i = 0; i < n; i++)
+            if (d[i].kind == DECO_LINK &&
+                d[i].aux_len == 8 && strncmp(t + d[i].aux_start, "http://x", 8) == 0)
+                ok = 1;
+        CHECK(ok == 1);   /* aux is "http://x", not "**](http://x" */
+        free(d);
+    }
 }
