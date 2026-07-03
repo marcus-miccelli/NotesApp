@@ -32,6 +32,9 @@ typedef struct {
     int      listnum;      /* next ordinal for ordered lists */
     int      in_li;
     int      li_first_text;
+    int    li_is_task;
+    int    li_task_checked;
+    size_t li_task_mark_off;    /* source offset of the mark char between [ ] */
     /* reveal window */
     size_t sel_lo, sel_hi;   /* reveal window; lo>hi = hide all */
 } DCtx;
@@ -82,7 +85,13 @@ static int d_enter_block(MD_BLOCKTYPE t, void* detail, void* ud) {
         MD_BLOCK_OL_DETAIL* d = (MD_BLOCK_OL_DETAIL*)detail;
         c->listkind = PARA_NUMBER; c->listnum = (int)d->start;
     }
-    if (t == MD_BLOCK_LI) { c->in_li = 1; c->li_first_text = 0; }
+    if (t == MD_BLOCK_LI) {
+        MD_BLOCK_LI_DETAIL* d = (MD_BLOCK_LI_DETAIL*)detail;
+        c->in_li = 1; c->li_first_text = 0;
+        c->li_is_task = d->is_task;
+        c->li_task_checked = d->is_task && (d->task_mark == 'x' || d->task_mark == 'X');
+        c->li_task_mark_off = (size_t)d->task_mark_offset;
+    }
     if (t == MD_BLOCK_CODE) { c->in_code = 1; c->code_first_text = 0; }
     if (t == MD_BLOCK_QUOTE) { c->in_quote = 1; c->quote_first_text = 0; }
     return 0;
@@ -192,7 +201,16 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
         c->li_first_text = 1;
         size_t ls = off;
         while (ls > 0 && c->base[ls-1] != '\n' && c->base[ls-1] != '\r') ls--;
-        push_hide(c, ls, off - ls);           /* "- "/"N. " */
+        if (c->li_is_task) {
+            /* keep "[x]" visible: hide "- " before it and the run after it up to
+             * the content; the mark char sits at li_task_mark_off (between [ ]). */
+            size_t cb0 = c->li_task_mark_off > 0 ? c->li_task_mark_off - 1 : 0; /* '[' */
+            size_t cb1 = c->li_task_mark_off + 2;                               /* past ']' */
+            push_hide(c, ls, cb0 - ls);        /* "- " */
+            if (off > cb1) push_hide(c, cb1, off - cb1);   /* space(s) after "]" */
+        } else {
+            push_hide(c, ls, off - ls);        /* "- "/"N. " */
+        }
         push(c, DECO_PARA, ls, (off - ls) + (size_t)size,
              0, c->listkind,
              c->listkind == PARA_NUMBER ? c->listnum : 0);
@@ -200,6 +218,7 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
 
     MdFmt f = 0;
     for (int i = 0; i < c->depth; i++) f |= c->sp[i].fmt;
+    if (c->in_li && c->li_task_checked) f |= MD_FMT_STRIKE;
     if (c->in_heading) {
         if (!c->h_first_text) {
             c->h_first_text = 1;
@@ -231,7 +250,7 @@ size_t markdown_decorate(const char* text, size_t len,
     c.sel_lo = sel_lo; c.sel_hi = sel_hi;
     MD_PARSER p; memset(&p, 0, sizeof p);
     p.abi_version = 0;
-    p.flags = MD_DIALECT_COMMONMARK | MD_FLAG_STRIKETHROUGH;
+    p.flags = MD_DIALECT_COMMONMARK | MD_FLAG_STRIKETHROUGH | MD_FLAG_TASKLISTS;
     p.enter_block = d_enter_block;
     p.leave_block = d_leave_block;
     p.text        = d_text;

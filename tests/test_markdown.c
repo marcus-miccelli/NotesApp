@@ -163,6 +163,25 @@ void test_markdown(void) {
         free(d);
     }
 
+    /* --- task list --- */
+    {
+        const char* t = "- [ ] todo\n- [x] done";
+        Deco* d = NULL; size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d);
+        int bullets = 0, struck = 0, checkbox_visible = 1;
+        for (size_t i = 0; i < n; i++) {
+            if (d[i].kind == DECO_PARA && d[i].para == PARA_BULLET) bullets++;
+            if (d[i].kind == DECO_FMT && (d[i].fmt & MD_FMT_STRIKE)) struck = 1;
+            /* a hide covering the first-line checkbox "[ ]" (offsets 2..5) would
+             * mean the checkbox was hidden — it must NOT be */
+            if (d[i].kind == DECO_HIDE && d[i].start <= 2 && d[i].start + d[i].len > 3)
+                checkbox_visible = 0;
+        }
+        CHECK(bullets == 2);        /* both items are bullets */
+        CHECK(struck == 1);         /* the checked item strikes its content */
+        CHECK(checkbox_visible == 1); /* "[ ]" stays visible */
+        free(d);
+    }
+
     /* --- blockquote --- */
     {
         const char* t = "> quoted";
