@@ -90,6 +90,7 @@ static const COLORREF COL_CODE_BG = RGB(0x18, 0x18, 0x1c);  /* code-block backgr
 typedef struct {
     char id[16];      /* note id */
     HWND edit;        /* this tab's body RichEdit */
+    int  last_lines;  /* line count at last restyle; a change forces whole-doc */
 } NoteTab;
 
 typedef struct {
@@ -648,6 +649,14 @@ static void nw_restyle(NoteWin* nw, int tab, int scoped) {
         gte.codepage = CP_ACP; gte.lpDefaultChar = NULL; gte.lpUsedDefChar = NULL;
         SendMessageW(edit, EM_GETTEXTEX, (WPARAM)&gte, (LPARAM)buf);
     } else buf[0] = '\0';
+
+    /* A multi-line paste/cut collapses the caret, so a scoped restyle would miss
+     * the other changed paragraphs. Detect it via a line-count delta and fall
+     * back to a whole-document restyle. */
+    int cur_lines = 1;
+    for (int k = 0; k < len; k++) if (buf[k] == '\n' || buf[k] == '\r') cur_lines++;
+    if (cur_lines != nw->tab[tab].last_lines) scoped = 0;
+    nw->tab[tab].last_lines = cur_lines;
 
     CHARRANGE saved; SendMessageW(edit, EM_EXGETSEL, 0, (LPARAM)&saved);
     size_t sel_lo = (size_t)saved.cpMin, sel_hi = (size_t)saved.cpMax;
