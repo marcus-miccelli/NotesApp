@@ -199,8 +199,9 @@ static int d_enter_span(MD_SPANTYPE t, void* detail, void* ud) {
         MD_SPAN_A_DETAIL* a = (MD_SPAN_A_DETAIL*)detail;
         c->in_a = 1; c->a_text_set = 0;
         c->a_is_autolink = a->is_autolink;
-        c->a_url_len = (size_t)a->href.size;
-        c->a_url_off = pool_add(c, a->href.text, c->a_url_len);
+        size_t before = c->upcount;
+        c->a_url_off = pool_add(c, a->href.text, (size_t)a->href.size);
+        c->a_url_len = c->upcount - before;   /* 0 if pool_add failed (OOM) */
         return 0;
     }
     if (!span_fmt(t)) return 0;

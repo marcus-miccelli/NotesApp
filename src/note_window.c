@@ -601,7 +601,7 @@ static void nw_apply_decos(NoteWin* nw, HWND edit, const char* urlpool,
         size_t ul = d[i].aux_len; if (ul > 511) ul = 511;
         nw->links[nw->nlinks].a = (LONG)d[i].start;
         nw->links[nw->nlinks].b = (LONG)(d[i].start + d[i].len);
-        memcpy(nw->links[nw->nlinks].url, urlpool + d[i].aux_start, ul);
+        if (ul) memcpy(nw->links[nw->nlinks].url, urlpool + d[i].aux_start, ul);
         nw->links[nw->nlinks].url[ul] = '\0';
         nw->nlinks++;
     }
