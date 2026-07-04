@@ -90,6 +90,8 @@ static const COLORREF COL_CODE_BG = RGB(0x18, 0x18, 0x1c);  /* code-block backgr
 typedef struct {
     char id[16];      /* note id */
     HWND edit;        /* this tab's body RichEdit */
+    int  last_lines;  /* line count at last restyle; a change forces whole-doc */
+    size_t last_caret_para;   /* paragraph offset last revealed (per tab) */
 } NoteTab;
 
 typedef struct {
@@ -116,7 +118,6 @@ typedef struct {
     HFONT rename_font;  /* font for the rename edit; freed on commit */
     int   rename_tab;   /* index of the tab being renamed */
     GfxD2D* gfx;        /* Direct2D chrome renderer; lazy-created in WM_PAINT */
-    size_t last_caret_para;   /* start offset of the paragraph last revealed */
     struct { LONG a, b; char url[512]; } links[256];
     int   nlinks;
 } NoteWin;
@@ -562,7 +563,7 @@ static void nw_fmt_range(HWND edit, size_t start, size_t len, MdFmt fmt) {
     SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
 }
 
-static void nw_hide_range2(HWND edit, size_t start, size_t len) {
+static void nw_hide_range(HWND edit, size_t start, size_t len) {
     CHARRANGE r = { (LONG)start, (LONG)(start + len) };
     SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&r);
     CHARFORMAT2W cf; memset(&cf, 0, sizeof cf); cf.cbSize = sizeof cf;
@@ -587,8 +588,8 @@ static void nw_para_range(HWND edit, size_t start, size_t len, ParaKind kind) {
 }
 
 /* Reset [lo,hi] to base formatting, then apply every decoration intersecting it. */
-static void nw_apply_decos(NoteWin* nw, HWND edit, const char* buf, int len,
-                           Deco* d, size_t n, size_t lo, size_t hi) {
+static void nw_apply_decos(NoteWin* nw, HWND edit, const char* urlpool,
+                           int len, Deco* d, size_t n, size_t lo, size_t hi) {
     if (hi > (size_t)len) hi = (size_t)len;
     /* The link table always reflects the whole current document (every
      * DECO_LINK), independent of the scoped [lo,hi] char-format window — so it
@@ -600,7 +601,7 @@ static void nw_apply_decos(NoteWin* nw, HWND edit, const char* buf, int len,
         size_t ul = d[i].aux_len; if (ul > 511) ul = 511;
         nw->links[nw->nlinks].a = (LONG)d[i].start;
         nw->links[nw->nlinks].b = (LONG)(d[i].start + d[i].len);
-        memcpy(nw->links[nw->nlinks].url, buf + d[i].aux_start, ul);
+        if (ul) memcpy(nw->links[nw->nlinks].url, urlpool + d[i].aux_start, ul);
         nw->links[nw->nlinks].url[ul] = '\0';
         nw->nlinks++;
     }
@@ -618,7 +619,7 @@ static void nw_apply_decos(NoteWin* nw, HWND edit, const char* buf, int len,
         size_t a = d[i].start, b = a + d[i].len;
         if (b <= lo || a >= hi) continue;                 /* outside range */
         if (d[i].kind == DECO_FMT)  nw_fmt_range(edit, a, d[i].len, d[i].fmt);
-        else if (d[i].kind == DECO_HIDE) nw_hide_range2(edit, a, d[i].len);
+        else if (d[i].kind == DECO_HIDE) nw_hide_range(edit, a, d[i].len);
         else if (d[i].kind == DECO_PARA) nw_para_range(edit, a, d[i].len, d[i].para);
     }
 }
@@ -649,6 +650,14 @@ static void nw_restyle(NoteWin* nw, int tab, int scoped) {
         SendMessageW(edit, EM_GETTEXTEX, (WPARAM)&gte, (LPARAM)buf);
     } else buf[0] = '\0';
 
+    /* A multi-line paste/cut collapses the caret, so a scoped restyle would miss
+     * the other changed paragraphs. Detect it via a line-count delta and fall
+     * back to a whole-document restyle. */
+    int cur_lines = 1;
+    for (int k = 0; k < len; k++) if (buf[k] == '\n' || buf[k] == '\r') cur_lines++;
+    if (cur_lines != nw->tab[tab].last_lines) scoped = 0;
+    nw->tab[tab].last_lines = cur_lines;
+
     CHARRANGE saved; SendMessageW(edit, EM_EXGETSEL, 0, (LPARAM)&saved);
     size_t sel_lo = (size_t)saved.cpMin, sel_hi = (size_t)saved.cpMax;
 
@@ -662,10 +671,11 @@ static void nw_restyle(NoteWin* nw, int tab, int scoped) {
         if (plo == clo && phi == chi) { lo = plo; hi = phi; }
     }
 
-    Deco* d = NULL;
-    size_t n = markdown_decorate(buf, (size_t)len, sel_lo, sel_hi, &d);
-    nw_apply_decos(nw, edit, buf, len, d, n, lo, hi);
+    Deco* d = NULL; char* pool = NULL;
+    size_t n = markdown_decorate(buf, (size_t)len, sel_lo, sel_hi, &d, &pool);
+    nw_apply_decos(nw, edit, pool, len, d, n, lo, hi);
     free(d);
+    free(pool);
     free(buf);
 
     SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&saved);
@@ -1511,8 +1521,8 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     size_t lo = (size_t)sel.cpMin, hi = lo;
                     nw_para_bounds(b, len, &lo, &hi);
                     free(b);
-                    if (lo != nw->last_caret_para) {
-                        nw->last_caret_para = lo;
+                    if (lo != nw->tab[nw->active].last_caret_para) {
+                        nw->tab[nw->active].last_caret_para = lo;
                         SendMessageW(e, WM_SETREDRAW, FALSE, 0);
                         nw_restyle(nw, nw->active, 0);   /* whole doc: flip reveal */
                         SendMessageW(e, WM_SETREDRAW, TRUE, 0);

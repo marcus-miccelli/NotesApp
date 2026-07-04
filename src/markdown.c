@@ -21,6 +21,7 @@ typedef struct {
     /* quote block state */
     int    in_quote;
     int    quote_first_text;
+    size_t quote_start;
     /* inline span stack */
     struct { MdFmt fmt; int marklen; int start_set; } sp[64];
     int    depth;
@@ -39,6 +40,10 @@ typedef struct {
     int    in_a;
     int    a_text_set;
     size_t a_text_start;
+    int    a_is_autolink;
+    size_t a_url_off, a_url_len;   /* url span in the pool */
+    char*  urlpool;
+    size_t upcount, upcap;
     /* reveal window */
     size_t sel_lo, sel_hi;   /* reveal window; lo>hi = hide all */
 } DCtx;
@@ -52,6 +57,21 @@ static int in_reveal(DCtx* c, size_t start, size_t len) {
     size_t pe = start + len;
     while (pe < c->len && c->base[pe] != '\n' && c->base[pe] != '\r') pe++;
     return c->sel_lo <= pe && c->sel_hi >= ps;         /* ranges overlap */
+}
+
+/* Append n bytes to the url pool, returning the start offset. Not NUL-terminated
+ * in the pool (the consumer terminates its own copy). */
+static size_t pool_add(DCtx* c, const char* s, size_t n) {
+    if (c->upcount + n > c->upcap) {
+        size_t nc = c->upcap ? c->upcap * 2 : 128;
+        while (nc < c->upcount + n) nc *= 2;
+        char* np = realloc(c->urlpool, nc);
+        if (!np) return c->upcount;    /* drop on OOM; url stays empty */
+        c->urlpool = np; c->upcap = nc;
+    }
+    size_t off = c->upcount;
+    if (n) { memcpy(c->urlpool + off, s, n); c->upcount += n; }
+    return off;
 }
 
 static void push(DCtx* c, DecoKind k, size_t start, size_t len,
@@ -137,7 +157,28 @@ static int d_leave_block(MD_BLOCKTYPE t, void* detail, void* ud) {
         c->in_code = 0;
         c->code_first_text = 0;
     }
-    if (t == MD_BLOCK_QUOTE) c->in_quote = 0;
+    if (t == MD_BLOCK_QUOTE) {
+        if (c->quote_first_text) {
+            /* indent the whole quote, then hide the "> " prefix on every line */
+            push(c, DECO_PARA, c->quote_start,
+                 c->last_text_end - c->quote_start, 0, PARA_QUOTE, 0);
+            size_t p = c->quote_start;
+            while (p < c->last_text_end) {
+                size_t ls = p, q = p;
+                while (q < c->len && c->base[q] == ' ') q++;   /* optional indent */
+                if (q < c->len && c->base[q] == '>') {
+                    q++;
+                    if (q < c->len && c->base[q] == ' ') q++;
+                    push_hide(c, ls, q - ls);                  /* ">"/"> " */
+                }
+                while (p < c->len && c->base[p] != '\n' && c->base[p] != '\r') p++;
+                if (p < c->len && c->base[p] == '\r') p++;
+                if (p < c->len && c->base[p] == '\n') p++;
+            }
+        }
+        c->in_quote = 0;
+        c->quote_first_text = 0;
+    }
     return 0;
 }
 static MdFmt span_fmt(MD_SPANTYPE t) {
@@ -153,8 +194,16 @@ static int span_marklen(MD_SPANTYPE t) {
     return -1;   /* code: computed lazily from the backtick run */
 }
 static int d_enter_span(MD_SPANTYPE t, void* detail, void* ud) {
-    (void)detail; DCtx* c = (DCtx*)ud;
-    if (t == MD_SPAN_A) { c->in_a = 1; c->a_text_set = 0; return 0; }
+    DCtx* c = (DCtx*)ud;
+    if (t == MD_SPAN_A) {
+        MD_SPAN_A_DETAIL* a = (MD_SPAN_A_DETAIL*)detail;
+        c->in_a = 1; c->a_text_set = 0;
+        c->a_is_autolink = a->is_autolink;
+        size_t before = c->upcount;
+        c->a_url_off = pool_add(c, a->href.text, (size_t)a->href.size);
+        c->a_url_len = c->upcount - before;   /* 0 if pool_add failed (OOM) */
+        return 0;
+    }
     if (!span_fmt(t)) return 0;
     if (c->depth >= 64) { c->over++; return 0; }   /* dropped; balance on leave */
     c->sp[c->depth].fmt = span_fmt(t);
@@ -166,25 +215,28 @@ static int d_enter_span(MD_SPANTYPE t, void* detail, void* ud) {
 static int d_leave_span(MD_SPANTYPE t, void* detail, void* ud) {
     (void)detail; DCtx* c = (DCtx*)ud;
     if (t == MD_SPAN_A) {
-        /* End of visible link text. Use the same close-cursor-aware anchor as
-         * emphasis closes so nested/trailing inline markup (e.g. "[**b**](url)")
-         * is accounted for — raw last_text_end stops before the inner close. */
         size_t te = c->last_text_end > c->close_cursor ? c->last_text_end
                                                        : c->close_cursor;
-        /* Only handle inline links "](...)"; leave reference/shortcut links
-         * ("[t][ref]", "[t]") untouched rather than mis-scanning the line. */
-        if (te + 1 < c->len && c->base[te] == ']' && c->base[te+1] == '(') {
-            size_t p = te + 2;                  /* past "](" */
-            size_t url_start = p;
-            while (p < c->len && c->base[p] != ')' && c->base[p] != ' ' &&
-                   c->base[p] != '\t' && c->base[p] != '\n') p++;
-            size_t url_len = p - url_start;
-            while (p < c->len && c->base[p] != ')' && c->base[p] != '\n') p++;  /* skip title */
-            if (p < c->len && c->base[p] == ')') p++;                            /* include ')' */
-            push_hide(c, te, p - te);           /* hide "](url...)" */
-            if (c->a_text_set)
-                push_link(c, c->a_text_start, te - c->a_text_start, url_start, url_len);
+        if (c->a_is_autolink) {
+            size_t he = te;
+            if (te < c->len && c->base[te] == '>') he = te + 1;   /* hide '>' */
+            push_hide(c, te, he - te);
+        } else if (te < c->len && c->base[te] == ']') {
+            size_t p = te + 1;
+            if (p < c->len && c->base[p] == '(') {                /* inline "](url)" */
+                while (p < c->len && c->base[p] != ')' && c->base[p] != '\n') p++;
+                if (p < c->len && c->base[p] == ')') p++;
+            } else if (p < c->len && c->base[p] == '[') {         /* reference "][ref]" */
+                p++;
+                while (p < c->len && c->base[p] != ']' && c->base[p] != '\n') p++;
+                if (p < c->len && c->base[p] == ']') p++;
+            }
+            /* else shortcut "]": p stays te+1 */
+            push_hide(c, te, p - te);
         }
+        if (c->a_text_set)
+            push_link(c, c->a_text_start, te - c->a_text_start,
+                      c->a_url_off, c->a_url_len);
         c->in_a = 0;
         return 0;
     }
@@ -239,9 +291,13 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
     if (c->in_a && !c->a_text_set) {
         c->a_text_set = 1;
         c->a_text_start = off;
-        size_t ab = off;                       /* scan left to the '[' */
-        while (ab > 0 && c->base[ab-1] != '[') ab--;
-        if (ab > 0) push_hide(c, ab - 1, 1);   /* hide '[' */
+        if (c->a_is_autolink) {
+            if (off > 0) push_hide(c, off - 1, 1);      /* hide '<' */
+        } else {
+            size_t ab = off;                            /* scan left to the '[' */
+            while (ab > 0 && c->base[ab-1] != '[') ab--;
+            if (ab > 0) push_hide(c, ab - 1, 1);        /* hide '[' */
+        }
     }
 
     if (c->in_li && !c->li_first_text) {
@@ -281,8 +337,7 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
             c->quote_first_text = 1;
             size_t ls = off;
             while (ls > 0 && c->base[ls-1] != '\n' && c->base[ls-1] != '\r') ls--;
-            push_hide(c, ls, off - ls);                    /* "> " */
-            push(c, DECO_PARA, ls, (off - ls) + (size_t)size, 0, PARA_QUOTE, 0);
+            c->quote_start = ls;
         }
         f |= MD_FMT_QUOTE;
     }
@@ -292,7 +347,7 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
 }
 
 size_t markdown_decorate(const char* text, size_t len,
-                         size_t sel_lo, size_t sel_hi, Deco** out) {
+                         size_t sel_lo, size_t sel_hi, Deco** out, char** urlpool) {
     DCtx c; memset(&c, 0, sizeof c);
     c.base = text; c.len = len;
     c.sel_lo = sel_lo; c.sel_hi = sel_hi;
@@ -306,12 +361,13 @@ size_t markdown_decorate(const char* text, size_t len,
     p.leave_span = d_leave_span;
     md_parse(text, (MD_SIZE)len, &p, &c);
     *out = c.arr;
+    *urlpool = c.urlpool;
     return c.count;
 }
 
 MdFmt markdown_fmt_at(const char* text, size_t len, size_t caret) {
-    Deco* d = NULL;
-    size_t n = markdown_decorate(text, len, (size_t)-1, 0, &d);
+    Deco* d = NULL; char* pool = NULL;
+    size_t n = markdown_decorate(text, len, (size_t)-1, 0, &d, &pool);
     MdFmt f = 0;
     for (size_t i = 0; i < n; i++) {
         if (d[i].kind != DECO_FMT) continue;
@@ -320,7 +376,7 @@ MdFmt markdown_fmt_at(const char* text, size_t len, size_t caret) {
         if ((caret > a && caret <= b) || (caret >= a && caret < b))
             f |= d[i].fmt;
     }
-    free(d);
+    free(d); free(pool);
     f &= ~(MdFmt)(MD_FMT_H1 | MD_FMT_H2 | MD_FMT_H3);   /* headings not toggles */
     return f;
 }

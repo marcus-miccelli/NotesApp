@@ -24,15 +24,15 @@ typedef struct {
     MdFmt    fmt;     /* DECO_FMT */
     ParaKind para;    /* DECO_PARA */
     int      number;  /* DECO_PARA + PARA_NUMBER: ordinal */
-    size_t   aux_start; /* DECO_LINK: url source span start */
-    size_t   aux_len;   /* DECO_LINK: url source span length */
+    size_t   aux_start; /* DECO_LINK: url offset into the parse's url pool */
+    size_t   aux_len;   /* DECO_LINK: url length in the url pool */
 } Deco;
 
 /* Build the full-document decoration list. Markers hide everywhere except the
  * paragraph(s) intersecting [sel_lo, sel_hi]; pass sel_lo > sel_hi to hide all.
  * *out is malloc'd (free() it). Returns the count. Grows dynamically. */
-size_t markdown_decorate(const char* text, size_t len,
-                         size_t sel_lo, size_t sel_hi, Deco** out);
+size_t markdown_decorate(const char* text, size_t len, size_t sel_lo,
+                         size_t sel_hi, Deco** out, char** urlpool);
 
 /* Inline format flags active at a caret offset (for sidebar toggles). */
 MdFmt markdown_fmt_at(const char* text, size_t len, size_t caret);
