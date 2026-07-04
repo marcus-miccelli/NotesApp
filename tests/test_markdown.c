@@ -215,6 +215,21 @@ void test_markdown(void) {
         free(d); free(pool);
     }
 
+    /* --- multi-line blockquote: BOTH "> " markers hidden --- */
+    {
+        const char* t = "> a\n> b";   /* line1 "> " at 0, line2 "> " at 4 */
+        Deco* d = NULL; char* pool = NULL;
+        size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d, &pool);
+        int hid1 = 0, hid2 = 0;
+        for (size_t i = 0; i < n; i++) if (d[i].kind == DECO_HIDE) {
+            if (d[i].start == 0 && d[i].len == 2) hid1 = 1;
+            if (d[i].start == 4 && d[i].len == 2) hid2 = 1;
+        }
+        CHECK(hid1 == 1);   /* first line "> " */
+        CHECK(hid2 == 1);   /* continuation "> " */
+        free(d); free(pool);
+    }
+
     /* --- link --- */
     {
         const char* t = "[go](http://x)";  /* text 1..3, url 5..13 */

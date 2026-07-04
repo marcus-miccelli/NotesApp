@@ -21,6 +21,7 @@ typedef struct {
     /* quote block state */
     int    in_quote;
     int    quote_first_text;
+    size_t quote_start;
     /* inline span stack */
     struct { MdFmt fmt; int marklen; int start_set; } sp[64];
     int    depth;
@@ -156,7 +157,28 @@ static int d_leave_block(MD_BLOCKTYPE t, void* detail, void* ud) {
         c->in_code = 0;
         c->code_first_text = 0;
     }
-    if (t == MD_BLOCK_QUOTE) c->in_quote = 0;
+    if (t == MD_BLOCK_QUOTE) {
+        if (c->quote_first_text) {
+            /* indent the whole quote, then hide the "> " prefix on every line */
+            push(c, DECO_PARA, c->quote_start,
+                 c->last_text_end - c->quote_start, 0, PARA_QUOTE, 0);
+            size_t p = c->quote_start;
+            while (p < c->last_text_end) {
+                size_t ls = p, q = p;
+                while (q < c->len && c->base[q] == ' ') q++;   /* optional indent */
+                if (q < c->len && c->base[q] == '>') {
+                    q++;
+                    if (q < c->len && c->base[q] == ' ') q++;
+                    push_hide(c, ls, q - ls);                  /* ">"/"> " */
+                }
+                while (p < c->len && c->base[p] != '\n' && c->base[p] != '\r') p++;
+                if (p < c->len && c->base[p] == '\r') p++;
+                if (p < c->len && c->base[p] == '\n') p++;
+            }
+        }
+        c->in_quote = 0;
+        c->quote_first_text = 0;
+    }
     return 0;
 }
 static MdFmt span_fmt(MD_SPANTYPE t) {
@@ -314,8 +336,7 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
             c->quote_first_text = 1;
             size_t ls = off;
             while (ls > 0 && c->base[ls-1] != '\n' && c->base[ls-1] != '\r') ls--;
-            push_hide(c, ls, off - ls);                    /* "> " */
-            push(c, DECO_PARA, ls, (off - ls) + (size_t)size, 0, PARA_QUOTE, 0);
+            c->quote_start = ls;
         }
         f |= MD_FMT_QUOTE;
     }
