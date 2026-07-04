@@ -91,6 +91,7 @@ typedef struct {
     char id[16];      /* note id */
     HWND edit;        /* this tab's body RichEdit */
     int  last_lines;  /* line count at last restyle; a change forces whole-doc */
+    size_t last_caret_para;   /* paragraph offset last revealed (per tab) */
 } NoteTab;
 
 typedef struct {
@@ -117,7 +118,6 @@ typedef struct {
     HFONT rename_font;  /* font for the rename edit; freed on commit */
     int   rename_tab;   /* index of the tab being renamed */
     GfxD2D* gfx;        /* Direct2D chrome renderer; lazy-created in WM_PAINT */
-    size_t last_caret_para;   /* start offset of the paragraph last revealed */
     struct { LONG a, b; char url[512]; } links[256];
     int   nlinks;
 } NoteWin;
@@ -563,7 +563,7 @@ static void nw_fmt_range(HWND edit, size_t start, size_t len, MdFmt fmt) {
     SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
 }
 
-static void nw_hide_range2(HWND edit, size_t start, size_t len) {
+static void nw_hide_range(HWND edit, size_t start, size_t len) {
     CHARRANGE r = { (LONG)start, (LONG)(start + len) };
     SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&r);
     CHARFORMAT2W cf; memset(&cf, 0, sizeof cf); cf.cbSize = sizeof cf;
@@ -619,7 +619,7 @@ static void nw_apply_decos(NoteWin* nw, HWND edit, const char* urlpool,
         size_t a = d[i].start, b = a + d[i].len;
         if (b <= lo || a >= hi) continue;                 /* outside range */
         if (d[i].kind == DECO_FMT)  nw_fmt_range(edit, a, d[i].len, d[i].fmt);
-        else if (d[i].kind == DECO_HIDE) nw_hide_range2(edit, a, d[i].len);
+        else if (d[i].kind == DECO_HIDE) nw_hide_range(edit, a, d[i].len);
         else if (d[i].kind == DECO_PARA) nw_para_range(edit, a, d[i].len, d[i].para);
     }
 }
@@ -1521,8 +1521,8 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     size_t lo = (size_t)sel.cpMin, hi = lo;
                     nw_para_bounds(b, len, &lo, &hi);
                     free(b);
-                    if (lo != nw->last_caret_para) {
-                        nw->last_caret_para = lo;
+                    if (lo != nw->tab[nw->active].last_caret_para) {
+                        nw->tab[nw->active].last_caret_para = lo;
                         SendMessageW(e, WM_SETREDRAW, FALSE, 0);
                         nw_restyle(nw, nw->active, 0);   /* whole doc: flip reveal */
                         SendMessageW(e, WM_SETREDRAW, TRUE, 0);
