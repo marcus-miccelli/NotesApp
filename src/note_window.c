@@ -1030,7 +1030,7 @@ static LRESULT CALLBACK nw_body_sub(HWND h, UINT msg, WPARAM wp, LPARAM lp,
                 size_t mo; int ck;
                 int hit = markdown_task_at(buf, (size_t)len, (size_t)cp, &mo, &ck);
                 free(buf);
-                if (hit) { SetCursor(LoadCursorW(NULL, IDC_HAND)); return TRUE; }
+                if (hit) { SetCursor(LoadCursorW(NULL, MAKEINTRESOURCEW(32649))); return TRUE; }  /* IDC_HAND */
             }
         }
     }
