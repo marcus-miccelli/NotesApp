@@ -993,10 +993,12 @@ static void nw_close_tab(NoteWin* nw, HWND hwnd, int i) {
 
 /* Flip the task mark at mark_off between space and 'x', then save + reformat. */
 static void nw_toggle_task(NoteWin* nw, HWND edit, size_t mark_off, int checked) {
+    CHARRANGE saved; SendMessageW(edit, EM_EXGETSEL, 0, (LPARAM)&saved);   /* keep caret */
     SendMessageW(edit, EM_SETEVENTMASK, 0, 0);            /* mute; we reformat */
     CHARRANGE r = { (LONG)mark_off, (LONG)(mark_off + 1) };
     SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&r);
     SendMessageW(edit, EM_REPLACESEL, TRUE, (LPARAM)(checked ? L" " : L"x"));
+    SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&saved);   /* restore caret before reformat */
     SendMessageW(edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
     nw_reformat_now(nw);
 }
@@ -1020,7 +1022,7 @@ static LRESULT CALLBACK nw_body_sub(HWND h, UINT msg, WPARAM wp, LPARAM lp,
                 if (hit) { nw_toggle_task(nw, h, mo, ck); return 0; }  /* consume */
             }
         }
-    } else if (msg == WM_SETCURSOR) {
+    } else if (msg == WM_SETCURSOR && LOWORD(lp) == HTCLIENT) {
         POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
         POINTL pt = { p.x, p.y };
         int cp = (int)SendMessageW(h, EM_CHARFROMPOS, 0, (LPARAM)&pt);
