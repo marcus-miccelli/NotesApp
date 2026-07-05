@@ -991,6 +991,52 @@ static void nw_close_tab(NoteWin* nw, HWND hwnd, int i) {
     /* nw_remove_tab may have destroyed hwnd; do not touch nw after this */
 }
 
+/* Flip the task mark at mark_off between space and 'x', then save + reformat. */
+static void nw_toggle_task(NoteWin* nw, HWND edit, size_t mark_off, int checked) {
+    SendMessageW(edit, EM_SETEVENTMASK, 0, 0);            /* mute; we reformat */
+    CHARRANGE r = { (LONG)mark_off, (LONG)(mark_off + 1) };
+    SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&r);
+    SendMessageW(edit, EM_REPLACESEL, TRUE, (LPARAM)(checked ? L" " : L"x"));
+    SendMessageW(edit, EM_SETEVENTMASK, 0, EDIT_EVENT_MASK);
+    nw_reformat_now(nw);
+}
+
+/* Body RichEdit subclass: plain-click a task checkbox toggles it (caret stays
+ * put), and the cursor shows a hand over checkboxes. Non-checkbox mouse input
+ * falls through to RichEdit's default handling. */
+static LRESULT CALLBACK nw_body_sub(HWND h, UINT msg, WPARAM wp, LPARAM lp,
+                                    UINT_PTR id, DWORD_PTR ref) {
+    (void)id;
+    NoteWin* nw = (NoteWin*)ref;
+    if (msg == WM_LBUTTONDOWN) {
+        POINTL pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        int cp = (int)SendMessageW(h, EM_CHARFROMPOS, 0, (LPARAM)&pt);
+        if (cp >= 0) {
+            int len; char* buf = nw_body_text(h, &len);
+            if (buf) {
+                size_t mo; int ck;
+                int hit = markdown_task_at(buf, (size_t)len, (size_t)cp, &mo, &ck);
+                free(buf);
+                if (hit) { nw_toggle_task(nw, h, mo, ck); return 0; }  /* consume */
+            }
+        }
+    } else if (msg == WM_SETCURSOR) {
+        POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+        POINTL pt = { p.x, p.y };
+        int cp = (int)SendMessageW(h, EM_CHARFROMPOS, 0, (LPARAM)&pt);
+        if (cp >= 0) {
+            int len; char* buf = nw_body_text(h, &len);
+            if (buf) {
+                size_t mo; int ck;
+                int hit = markdown_task_at(buf, (size_t)len, (size_t)cp, &mo, &ck);
+                free(buf);
+                if (hit) { SetCursor(LoadCursorW(NULL, IDC_HAND)); return TRUE; }
+            }
+        }
+    }
+    return DefSubclassProc(h, msg, wp, lp);
+}
+
 /* Create a new note + its body RichEdit as a new tab and make it active. */
 static void nw_add_tab(NoteWin* nw, HWND hwnd) {
     if (nw->ntabs >= WIN_MAX_TABS) return;
@@ -1001,6 +1047,7 @@ static void nw_add_tab(NoteWin* nw, HWND hwnd) {
     nw->tab[i].edit = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
         WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
         0, 0, 100, 100, hwnd, (HMENU)ID_EDIT, GetModuleHandleW(NULL), NULL);
+    SetWindowSubclass(nw->tab[i].edit, nw_body_sub, 0, (DWORD_PTR)nw);
     SendMessageW(nw->tab[i].edit, EM_SETBKGNDCOLOR, 0, (LPARAM)COL_BG);
     CHARFORMAT2W cf; memset(&cf, 0, sizeof cf);
     cf.cbSize = sizeof cf; cf.dwMask = CFM_COLOR | CFM_FACE | CFM_SIZE;
@@ -1271,6 +1318,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL
                   | (i == nw->active ? WS_VISIBLE : 0),
                 0, 0, 100, 100, hwnd, (HMENU)ID_EDIT, cs->hInstance, NULL);
+            SetWindowSubclass(nw->tab[i].edit, nw_body_sub, 0, (DWORD_PTR)nw);
             SendMessageW(nw->tab[i].edit, EM_SETBKGNDCOLOR, 0, (LPARAM)COL_BG);
             CHARFORMAT2W cf; memset(&cf, 0, sizeof cf);
             cf.cbSize = sizeof cf; cf.dwMask = CFM_COLOR | CFM_FACE | CFM_SIZE;
