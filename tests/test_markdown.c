@@ -308,4 +308,26 @@ void test_markdown(void) {
         CHECK(ok == 1);
         free(d); free(pool);
     }
+
+    /* --- markdown_task_at --- */
+    {
+        const char* t = "- [ ] a";   /* '[' at 2, mark(space) at 3, ']' at 4 */
+        size_t mo = 0; int ck = 9;
+        CHECK(markdown_task_at(t, strlen(t), 2, &mo, &ck) == 1);  /* on '[' */
+        CHECK(mo == 3 && ck == 0);
+        CHECK(markdown_task_at(t, strlen(t), 3, &mo, &ck) == 1);  /* on mark */
+        CHECK(markdown_task_at(t, strlen(t), 4, &mo, &ck) == 1);  /* on ']' */
+        CHECK(markdown_task_at(t, strlen(t), 6, &mo, &ck) == 0);  /* in text */
+    }
+    {
+        const char* t = "- [x] b";
+        size_t mo = 0; int ck = 0;
+        CHECK(markdown_task_at(t, strlen(t), 3, &mo, &ck) == 1);
+        CHECK(ck == 1);
+    }
+    {
+        const char* t = "- a";       /* not a task item */
+        size_t mo = 0; int ck = 0;
+        CHECK(markdown_task_at(t, strlen(t), 2, &mo, &ck) == 0);
+    }
 }

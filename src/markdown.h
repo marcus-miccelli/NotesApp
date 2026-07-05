@@ -37,4 +37,10 @@ size_t markdown_decorate(const char* text, size_t len, size_t sel_lo,
 /* Inline format flags active at a caret offset (for sidebar toggles). */
 MdFmt markdown_fmt_at(const char* text, size_t len, size_t caret);
 
+/* If `off` is inside a task-list checkbox "[ ]"/"[x]", return 1 and set
+ * *mark_off to the source offset of the mark char and *checked to its state;
+ * else return 0. */
+int markdown_task_at(const char* text, size_t len, size_t off,
+                     size_t* mark_off, int* checked);
+
 #endif

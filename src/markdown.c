@@ -380,3 +380,52 @@ MdFmt markdown_fmt_at(const char* text, size_t len, size_t caret) {
     f &= ~(MdFmt)(MD_FMT_H1 | MD_FMT_H2 | MD_FMT_H3);   /* headings not toggles */
     return f;
 }
+
+typedef struct {
+    size_t off;       /* query offset */
+    int    found;
+    size_t mark_off;
+    int    checked;
+} TaskCtx;
+
+static int tq_enter_block(MD_BLOCKTYPE t, void* detail, void* ud) {
+    TaskCtx* c = (TaskCtx*)ud;
+    if (t == MD_BLOCK_LI) {
+        MD_BLOCK_LI_DETAIL* d = (MD_BLOCK_LI_DETAIL*)detail;
+        if (d->is_task) {
+            size_t m  = (size_t)d->task_mark_offset;
+            size_t lo = m > 0 ? m - 1 : 0;   /* '[' */
+            size_t hi = m + 2;               /* one past ']' */
+            if (c->off >= lo && c->off < hi) {
+                c->found = 1;
+                c->mark_off = m;
+                c->checked = (d->task_mark == 'x' || d->task_mark == 'X');
+            }
+        }
+    }
+    return 0;
+}
+static int tq_noop_b(MD_BLOCKTYPE t, void* d, void* u) { (void)t;(void)d;(void)u; return 0; }
+static int tq_noop_s(MD_SPANTYPE t, void* d, void* u)  { (void)t;(void)d;(void)u; return 0; }
+static int tq_noop_t(MD_TEXTTYPE t, const MD_CHAR* x, MD_SIZE n, void* u) {
+    (void)t;(void)x;(void)n;(void)u; return 0;
+}
+
+int markdown_task_at(const char* text, size_t len, size_t off,
+                     size_t* mark_off, int* checked) {
+    TaskCtx c; memset(&c, 0, sizeof c); c.off = off;
+    MD_PARSER p; memset(&p, 0, sizeof p);
+    p.abi_version = 0;
+    p.flags = MD_DIALECT_COMMONMARK | MD_FLAG_STRIKETHROUGH | MD_FLAG_TASKLISTS;
+    p.enter_block = tq_enter_block;
+    p.leave_block = tq_noop_b;
+    p.enter_span  = tq_noop_s;
+    p.leave_span  = tq_noop_s;
+    p.text        = tq_noop_t;
+    md_parse(text, (MD_SIZE)len, &p, &c);
+    if (c.found) {
+        if (mark_off) *mark_off = c.mark_off;
+        if (checked)  *checked  = c.checked;
+    }
+    return c.found;
+}
