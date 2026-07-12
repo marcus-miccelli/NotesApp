@@ -24,43 +24,49 @@ void test_markdown(void) {
     }
 
     /* --- markdown_decorate: inline --- */
-    {   /* "**bold**": hide [0,2], fmt [2,4] BOLD, hide [6,2] */
+    {   /* "**bold**": fmt [2,4] BOLD, hide [0,2], hide [6,2].
+         * Span-level reveal (see feature/span-reveal) defers inline-marker
+         * hides to d_leave_span, where the span's extent is known, so they
+         * now land AFTER the span's DECO_FMT in the list (was: hide, fmt,
+         * hide) — this reorders the array but not the set of decos. */
         const char* t = "**bold**";
         Deco* d = NULL; char* pool = NULL;
         size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d, &pool);
         CHECK(n == 3);
-        CHECK(d[0].kind == DECO_HIDE && d[0].start == 0 && d[0].len == 2);
-        CHECK(d[1].kind == DECO_FMT  && d[1].start == 2 && d[1].len == 4 &&
-              d[1].fmt == MD_FMT_BOLD);
+        CHECK(d[0].kind == DECO_FMT  && d[0].start == 2 && d[0].len == 4 &&
+              d[0].fmt == MD_FMT_BOLD);
+        CHECK(d[1].kind == DECO_HIDE && d[1].start == 0 && d[1].len == 2);
         CHECK(d[2].kind == DECO_HIDE && d[2].start == 6 && d[2].len == 2);
         free(d); free(pool);
     }
-    {   /* "*i*": hide[0,1] fmt[1,1] hide[2,1] */
+    {   /* "*i*": fmt[1,1] hide[0,1] hide[2,1] (see reorder note above) */
         const char* t = "*i*";
         Deco* d = NULL; char* pool = NULL;
         size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d, &pool);
         CHECK(n == 3);
-        CHECK(d[1].kind == DECO_FMT && d[1].fmt == MD_FMT_ITALIC &&
-              d[1].start == 1 && d[1].len == 1);
+        CHECK(d[0].kind == DECO_FMT && d[0].fmt == MD_FMT_ITALIC &&
+              d[0].start == 1 && d[0].len == 1);
         free(d); free(pool);
     }
-    {   /* "~~x~~": strike, markers len 2 */
+    {   /* "~~x~~": strike, markers len 2 (see reorder note above) */
         const char* t = "~~x~~";
         Deco* d = NULL; char* pool = NULL;
         size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d, &pool);
         CHECK(n == 3);
-        CHECK(d[0].kind == DECO_HIDE && d[0].len == 2);
-        CHECK(d[1].fmt == MD_FMT_STRIKE && d[1].start == 2 && d[1].len == 1);
+        CHECK(d[0].kind == DECO_FMT && d[0].fmt == MD_FMT_STRIKE &&
+              d[0].start == 2 && d[0].len == 1);
+        CHECK(d[1].kind == DECO_HIDE && d[1].len == 2);
         CHECK(d[2].kind == DECO_HIDE && d[2].start == 3 && d[2].len == 2);
         free(d); free(pool);
     }
-    {   /* "`c`": code, backtick markers len 1 */
+    {   /* "`c`": code, backtick markers len 1 (see reorder note above) */
         const char* t = "`c`";
         Deco* d = NULL; char* pool = NULL;
         size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d, &pool);
         CHECK(n == 3);
-        CHECK(d[0].kind == DECO_HIDE && d[0].start == 0 && d[0].len == 1);
-        CHECK(d[1].fmt == MD_FMT_CODE && d[1].start == 1 && d[1].len == 1);
+        CHECK(d[0].kind == DECO_FMT && d[0].fmt == MD_FMT_CODE &&
+              d[0].start == 1 && d[0].len == 1);
+        CHECK(d[1].kind == DECO_HIDE && d[1].start == 0 && d[1].len == 1);
         CHECK(d[2].kind == DECO_HIDE && d[2].start == 2 && d[2].len == 1);
         free(d); free(pool);
     }
@@ -69,13 +75,17 @@ void test_markdown(void) {
         Deco* d = NULL; char* pool = NULL;
         size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d, &pool);
         /* opening ** hidden at 0..2; inner * markers around b hidden; the "b"
-         * run carries BOLD|ITALIC; closing ** hidden at end. */
-        int saw_bi = 0;
-        for (size_t i = 0; i < n; i++)
+         * run carries BOLD|ITALIC; closing ** hidden at end. Order-independent
+         * (see reorder note above: inline hides now land at leave_span). */
+        int saw_bi = 0, saw_open_hide = 0;
+        for (size_t i = 0; i < n; i++) {
             if (d[i].kind == DECO_FMT &&
                 d[i].fmt == (MD_FMT_BOLD | MD_FMT_ITALIC)) saw_bi = 1;
+            if (d[i].kind == DECO_HIDE && d[i].start == 0 && d[i].len == 2)
+                saw_open_hide = 1;
+        }
         CHECK(saw_bi == 1);
-        CHECK(d[0].kind == DECO_HIDE && d[0].start == 0 && d[0].len == 2);
+        CHECK(saw_open_hide == 1);
         free(d); free(pool);
     }
 
@@ -357,4 +367,140 @@ void test_markdown(void) {
         CHECK((markdown_fmt_from_decos(d, n, 14) & MD_FMT_STRIKE) != 0); /* inside "b" */
         free(d); free(pool);
     }
+}
+
+/* --- span-level reveal: inline marker hides gate on span extent --- */
+static int find_hide(const Deco* d, size_t n, size_t start, size_t len,
+                     size_t* aux_s, size_t* aux_l) {
+    for (size_t i = 0; i < n; i++)
+        if (d[i].kind == DECO_HIDE && d[i].start == start && d[i].len == len) {
+            if (aux_s) *aux_s = d[i].aux_start;
+            if (aux_l) *aux_l = d[i].aux_len;
+            return 1;
+        }
+    return 0;
+}
+
+void test_span_reveal(void) {
+    Deco* d; char* pool; size_t n;
+
+    /* "a **b** c" — extent [2,7): open "**"@2, close "**"@5 */
+    const char* s1 = "a **b** c";
+    /* caret 0: same paragraph but outside the span -> markers hidden
+     * (this is the span-vs-paragraph proof: old code revealed them) */
+    n = markdown_decorate(s1, 9, 0, 0, &d, &pool);
+    size_t as = 0, al = 0;   /* init: silences -Wmaybe-uninitialized, not a semantic change */
+    CHECK(find_hide(d, n, 2, 2, &as, &al)); CHECK(as == 2 && al == 5);
+    CHECK(find_hide(d, n, 5, 2, &as, &al)); CHECK(as == 2 && al == 5);
+    free(d); free(pool);
+    /* caret 2 == extent start (touching) -> revealed (no hides) */
+    n = markdown_decorate(s1, 9, 2, 2, &d, &pool);
+    CHECK(!find_hide(d, n, 2, 2, NULL, NULL));
+    CHECK(!find_hide(d, n, 5, 2, NULL, NULL));
+    free(d); free(pool);
+    /* caret 7 == extent end (touching) -> revealed */
+    n = markdown_decorate(s1, 9, 7, 7, &d, &pool);
+    CHECK(!find_hide(d, n, 2, 2, NULL, NULL));
+    free(d); free(pool);
+    /* caret 8 (one past extent end) -> hidden again */
+    n = markdown_decorate(s1, 9, 8, 8, &d, &pool);
+    CHECK(find_hide(d, n, 2, 2, NULL, NULL));
+    free(d); free(pool);
+
+    /* nested "**a *b* c**" — outer [0,11), inner [4,7) */
+    const char* s2 = "**a *b* c**";
+    /* caret 5 (inside inner): all four marker hides revealed */
+    n = markdown_decorate(s2, 11, 5, 5, &d, &pool);
+    CHECK(!find_hide(d, n, 0, 2, NULL, NULL));
+    CHECK(!find_hide(d, n, 4, 1, NULL, NULL));
+    CHECK(!find_hide(d, n, 6, 1, NULL, NULL));
+    CHECK(!find_hide(d, n, 9, 2, NULL, NULL));
+    free(d); free(pool);
+    /* caret 8 (outer only): inner hides back, outer still revealed */
+    n = markdown_decorate(s2, 11, 8, 8, &d, &pool);
+    CHECK(find_hide(d, n, 4, 1, &as, &al)); CHECK(as == 4 && al == 3);
+    CHECK(find_hide(d, n, 6, 1, NULL, NULL));
+    CHECK(!find_hide(d, n, 0, 2, NULL, NULL));
+    CHECK(!find_hide(d, n, 9, 2, NULL, NULL));
+    free(d); free(pool);
+
+    /* code span "a `b` c" — extent [2,5) */
+    const char* s3 = "a `b` c";
+    n = markdown_decorate(s3, 7, 3, 3, &d, &pool);   /* caret in span */
+    CHECK(!find_hide(d, n, 2, 1, NULL, NULL));
+    CHECK(!find_hide(d, n, 4, 1, NULL, NULL));
+    free(d); free(pool);
+    n = markdown_decorate(s3, 7, 0, 0, &d, &pool);   /* caret outside */
+    CHECK(find_hide(d, n, 2, 1, &as, &al)); CHECK(as == 2 && al == 3);
+    free(d); free(pool);
+
+    /* link "x [t](u)" — '['@2, "](u)"@4 len4, extent [2,8) */
+    const char* s4 = "x [t](u)";
+    n = markdown_decorate(s4, 8, 0, 0, &d, &pool);   /* caret outside */
+    CHECK(find_hide(d, n, 2, 1, &as, &al)); CHECK(as == 2 && al == 6);
+    CHECK(find_hide(d, n, 4, 4, &as, &al)); CHECK(as == 2 && al == 6);
+    free(d); free(pool);
+    n = markdown_decorate(s4, 8, 6, 6, &d, &pool);   /* caret in url */
+    CHECK(!find_hide(d, n, 2, 1, NULL, NULL));
+    CHECK(!find_hide(d, n, 4, 4, NULL, NULL));
+    free(d); free(pool);
+
+    /* autolink "<http://x>" — '<'@0, '>'@9, extent [0,10) */
+    const char* s5 = "<http://x>";
+    n = markdown_decorate(s5, 10, 4, 4, &d, &pool);  /* caret inside */
+    CHECK(!find_hide(d, n, 0, 1, NULL, NULL));
+    CHECK(!find_hide(d, n, 9, 1, NULL, NULL));
+    free(d); free(pool);
+
+    /* block markers keep PARAGRAPH reveal: "# h\r\nx" — caret on the
+     * heading line reveals '#', caret on the other line hides it */
+    const char* s6 = "# h\r\nx";
+    n = markdown_decorate(s6, 6, 1, 1, &d, &pool);
+    CHECK(!find_hide(d, n, 0, 2, NULL, NULL));
+    free(d); free(pool);
+    n = markdown_decorate(s6, 6, 5, 5, &d, &pool);
+    CHECK(find_hide(d, n, 0, 2, &as, &al)); CHECK(al == 0);  /* block: no extent */
+    free(d); free(pool);
+
+    /* textless-span guard: bare "``" must not emit a bogus hide */
+    n = markdown_decorate("``", 2, (size_t)-1, 0, &d, &pool);
+    for (size_t i = 0; i < n; i++) CHECK(d[i].kind != DECO_HIDE || d[i].start < 2);
+    free(d); free(pool);
+}
+
+void test_reveal_sig(void) {
+    Deco* d; char* pool; size_t n;
+
+    const char* s1 = "a **b** c";                    /* extent [2,7) */
+    n = markdown_decorate(s1, 9, (size_t)-1, 0, &d, &pool);   /* hide-all */
+    CHECK(markdown_reveal_sig(d, n, 0, 0) == 0);               /* plain text */
+    size_t in1 = markdown_reveal_sig(d, n, 4, 4);
+    CHECK(in1 != 0);
+    CHECK(markdown_reveal_sig(d, n, 2, 2) == in1);             /* edges equal */
+    CHECK(markdown_reveal_sig(d, n, 7, 7) == in1);
+    CHECK(markdown_reveal_sig(d, n, 8, 8) == 0);               /* escaped */
+    CHECK(markdown_reveal_sig(d, n, 0, 4) == in1);             /* selection overlap */
+    free(d); free(pool);
+
+    const char* s2 = "**a *b* c**";                  /* outer [0,11) inner [4,7) */
+    n = markdown_decorate(s2, 11, (size_t)-1, 0, &d, &pool);
+    size_t inner = markdown_reveal_sig(d, n, 5, 5);
+    size_t outer = markdown_reveal_sig(d, n, 8, 8);
+    CHECK(inner != 0 && outer != 0 && inner != outer);
+    free(d); free(pool);
+
+    /* DECO_LINK aux is a POOL offset — must be ignored by the sig.
+     * "x [t](u)": link deco has aux_start==0; a misread extent [0,~1]
+     * would touch caret 0. Assert sig at 0 is exactly 0. */
+    const char* s4 = "x [t](u)";
+    n = markdown_decorate(s4, 8, (size_t)-1, 0, &d, &pool);
+    CHECK(markdown_reveal_sig(d, n, 0, 0) == 0);
+    CHECK(markdown_reveal_sig(d, n, 5, 5) != 0);
+    free(d); free(pool);
+
+    /* DECO_TASK aux ignored: "- [ ] a" */
+    const char* s7 = "- [ ] a";
+    n = markdown_decorate(s7, 7, (size_t)-1, 0, &d, &pool);
+    CHECK(markdown_reveal_sig(d, n, 6, 6) == 0);
+    free(d); free(pool);
 }

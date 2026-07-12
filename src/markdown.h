@@ -24,8 +24,12 @@ typedef struct {
     MdFmt    fmt;     /* DECO_FMT */
     ParaKind para;    /* DECO_PARA */
     int      number;  /* DECO_PARA + PARA_NUMBER: ordinal */
-    size_t   aux_start; /* DECO_LINK: url offset into the parse's url pool */
-    size_t   aux_len;   /* DECO_LINK: url length in the url pool */
+    size_t   aux_start; /* DECO_LINK: url offset into the parse's url pool;
+                         * DECO_HIDE (inline markers): span extent start;
+                         * DECO_TASK: source offset of the mark char */
+    size_t   aux_len;   /* DECO_LINK: url length in the pool;
+                         * DECO_HIDE (inline markers): span extent length
+                         * (0 on block-level hides) */
 } Deco;
 
 /* Build the full-document decoration list. Markers hide everywhere except the
@@ -47,5 +51,11 @@ int markdown_task_at(const char* text, size_t len, size_t off,
 MdFmt markdown_fmt_from_decos(const Deco* d, size_t n, size_t caret);
 int   markdown_task_from_decos(const Deco* d, size_t n, size_t off,
                                size_t* mark_off, int* checked);
+
+/* Signature of the set of inline span extents the reveal window [lo, hi]
+ * touches (boundary-inclusive; caret = lo == hi). 0 when none. Computed
+ * over a hide-all decoration list (extents ride on DECO_HIDE aux fields).
+ * Equal windows-touch-sets give equal signatures. */
+size_t markdown_reveal_sig(const Deco* d, size_t n, size_t lo, size_t hi);
 
 #endif

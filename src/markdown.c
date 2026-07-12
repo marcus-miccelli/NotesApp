@@ -23,7 +23,8 @@ typedef struct {
     int    quote_first_text;
     size_t quote_start;
     /* inline span stack */
-    struct { MdFmt fmt; int marklen; int start_set; } sp[64];
+    struct { MdFmt fmt; int marklen; int start_set;
+             size_t open_start; int open_len; } sp[64];
     int    depth;
     int    over;   /* tracked opens dropped past the depth cap; unwound on leave */
     size_t last_text_end;
@@ -42,6 +43,9 @@ typedef struct {
     size_t a_text_start;
     int    a_is_autolink;
     size_t a_url_off, a_url_len;   /* url span in the pool */
+    size_t a_open_off;             /* recorded '['/'<' (pushed at leave) */
+    size_t a_open_len;
+    int    a_open_set;
     char*  urlpool;
     size_t upcount, upcap;
     /* reveal window */
@@ -101,6 +105,30 @@ static void push_hide(DCtx* c, size_t start, size_t len) {
     if (len == 0) return;
     if (in_reveal(c, start, len)) return;   /* caret paragraph: show markers */
     push(c, DECO_HIDE, start, len, 0, PARA_NONE, 0);
+}
+
+/* Inclusive touch: caret offsets are between-char positions, so a window
+ * [lo, hi] touches an extent [a, b] when lo <= b && hi >= a. Shared by the
+ * builder gate below and markdown_reveal_sig — they must agree exactly. */
+static int md_touch(size_t lo, size_t hi, size_t a, size_t b) {
+    return lo <= b && hi >= a;
+}
+
+/* Hide an inline span marker: revealed only while the reveal window touches
+ * the span's full extent [ext_s, ext_e] (span-level reveal, vs. the
+ * paragraph-level push_hide). The extent rides on the deco's aux fields so
+ * cached hide-all lists can answer reveal queries without a parse. */
+static void push_hide_span(DCtx* c, size_t start, size_t len,
+                           size_t ext_s, size_t ext_e) {
+    if (len == 0) return;
+    if (c->sel_lo <= c->sel_hi && md_touch(c->sel_lo, c->sel_hi, ext_s, ext_e))
+        return;                            /* caret touches span: show markers */
+    size_t before = c->count;
+    push(c, DECO_HIDE, start, len, 0, PARA_NONE, 0);
+    if (c->count > before) {
+        c->arr[c->count - 1].aux_start = ext_s;
+        c->arr[c->count - 1].aux_len   = ext_e - ext_s;
+    }
 }
 
 static MdFmt dh_fmt(unsigned level) {
@@ -197,7 +225,7 @@ static int d_enter_span(MD_SPANTYPE t, void* detail, void* ud) {
     DCtx* c = (DCtx*)ud;
     if (t == MD_SPAN_A) {
         MD_SPAN_A_DETAIL* a = (MD_SPAN_A_DETAIL*)detail;
-        c->in_a = 1; c->a_text_set = 0;
+        c->in_a = 1; c->a_text_set = 0; c->a_open_set = 0;
         c->a_is_autolink = a->is_autolink;
         size_t before = c->upcount;
         c->a_url_off = pool_add(c, a->href.text, (size_t)a->href.size);
@@ -217,10 +245,9 @@ static int d_leave_span(MD_SPANTYPE t, void* detail, void* ud) {
     if (t == MD_SPAN_A) {
         size_t te = c->last_text_end > c->close_cursor ? c->last_text_end
                                                        : c->close_cursor;
+        size_t close_e = te;
         if (c->a_is_autolink) {
-            size_t he = te;
-            if (te < c->len && c->base[te] == '>') he = te + 1;   /* hide '>' */
-            push_hide(c, te, he - te);
+            if (te < c->len && c->base[te] == '>') close_e = te + 1;  /* '>' */
         } else if (te < c->len && c->base[te] == ']') {
             size_t p = te + 1;
             if (p < c->len && c->base[p] == '(') {                /* inline "](url)" */
@@ -232,7 +259,15 @@ static int d_leave_span(MD_SPANTYPE t, void* detail, void* ud) {
                 if (p < c->len && c->base[p] == ']') p++;
             }
             /* else shortcut "]": p stays te+1 */
-            push_hide(c, te, p - te);
+            close_e = p;
+        }
+        if (c->a_open_set) {
+            /* span-level reveal over the whole link syntax */
+            size_t ext_s = c->a_open_off, ext_e = close_e;
+            push_hide_span(c, c->a_open_off, c->a_open_len, ext_s, ext_e);
+            if (close_e > te) push_hide_span(c, te, close_e - te, ext_s, ext_e);
+        } else if (close_e > te) {
+            push_hide(c, te, close_e - te);   /* no opener recorded: legacy gate */
         }
         if (c->a_text_set)
             push_link(c, c->a_text_start, te - c->a_text_start,
@@ -247,7 +282,14 @@ static int d_leave_span(MD_SPANTYPE t, void* detail, void* ud) {
     int ml = c->sp[c->depth].marklen; if (ml < 0) ml = 0;
     size_t base = c->last_text_end > c->close_cursor ? c->last_text_end
                                                      : c->close_cursor;
-    if (ml > 0) push_hide(c, base, (size_t)ml);
+    /* full span extent incl. both markers; start_set guards a textless span
+     * (no opening marker recorded -> never emit a bogus hide) */
+    size_t ext_s = c->sp[c->depth].start_set ? c->sp[c->depth].open_start : base;
+    size_t ext_e = base + (size_t)ml;
+    if (c->sp[c->depth].start_set && c->sp[c->depth].open_len > 0)
+        push_hide_span(c, c->sp[c->depth].open_start,
+                       (size_t)c->sp[c->depth].open_len, ext_s, ext_e);
+    if (ml > 0) push_hide_span(c, base, (size_t)ml, ext_s, ext_e);
     c->close_cursor = base + (size_t)ml;
     return 0;
 }
@@ -272,7 +314,8 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
     }
 
     /* resolve opening markers for spans opened since the last text run,
-     * innermost first, consuming delimiter chars leftward from off. */
+     * innermost first, consuming delimiter chars leftward from off. The
+     * hide itself is pushed at d_leave_span, where the extent is known. */
     size_t cursor = off;
     for (int i = c->depth - 1; i >= 0 && !c->sp[i].start_set; i--) {
         int ml = c->sp[i].marklen;
@@ -282,8 +325,8 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
             ml = k; c->sp[i].marklen = ml;
         }
         if ((size_t)ml > cursor) ml = (int)cursor;   /* clamp: never underflow */
-        if (ml > 0)
-            push_hide(c, cursor - (size_t)ml, (size_t)ml);
+        c->sp[i].open_start = cursor - (size_t)ml;
+        c->sp[i].open_len   = ml;
         cursor -= (size_t)ml;
         c->sp[i].start_set = 1;
     }
@@ -292,11 +335,13 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
         c->a_text_set = 1;
         c->a_text_start = off;
         if (c->a_is_autolink) {
-            if (off > 0) push_hide(c, off - 1, 1);      /* hide '<' */
+            if (off > 0) { c->a_open_off = off - 1; c->a_open_len = 1;
+                           c->a_open_set = 1; }         /* '<' */
         } else {
             size_t ab = off;                            /* scan left to the '[' */
             while (ab > 0 && c->base[ab-1] != '[') ab--;
-            if (ab > 0) push_hide(c, ab - 1, 1);        /* hide '[' */
+            if (ab > 0) { c->a_open_off = ab - 1; c->a_open_len = 1;
+                          c->a_open_set = 1; }          /* '[' */
         }
     }
 
@@ -399,6 +444,18 @@ int markdown_task_from_decos(const Deco* d, size_t n, size_t off,
         }
     }
     return 0;
+}
+
+size_t markdown_reveal_sig(const Deco* d, size_t n, size_t lo, size_t hi) {
+    size_t sig = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (d[i].kind != DECO_HIDE || d[i].aux_len == 0) continue;
+        if (md_touch(lo, hi, d[i].aux_start, d[i].aux_start + d[i].aux_len))
+            /* summed, not XORed: a span's open+close hides share one extent
+             * and XOR would cancel the pair to 0 */
+            sig += d[i].aux_start * 2654435761u + d[i].aux_len * 40503u;
+    }
+    return sig;
 }
 
 MdFmt markdown_fmt_at(const char* text, size_t len, size_t caret) {

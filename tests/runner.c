@@ -11,6 +11,8 @@ void test_store(void);
 void test_prefs(void);
 void test_prefs_migration(void);
 void test_markdown(void);
+void test_span_reveal(void);
+void test_reveal_sig(void);
 void test_app(void);
 
 int main(void) {
@@ -20,6 +22,8 @@ int main(void) {
     test_prefs();
     test_prefs_migration();
     test_markdown();
+    test_span_reveal();
+    test_reveal_sig();
     test_app();
     printf("\n%d checks, %d failed\n", g_tests_run, g_tests_failed);
     return g_tests_failed == 0 ? 0 : 1;
