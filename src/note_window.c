@@ -1044,6 +1044,13 @@ static void nw_toggle_task(NoteWin* nw, HWND edit, size_t mark_off, int checked)
     nw_reformat_now(nw);
 }
 
+/* Tab index whose body edit is `edit`, or -1. */
+static int nw_tab_of_edit(NoteWin* nw, HWND edit) {
+    for (int i = 0; i < nw->ntabs; i++)
+        if (nw->tab[i].edit == edit) return i;
+    return -1;
+}
+
 /* Body RichEdit subclass: plain-click a task checkbox toggles it (caret stays
  * put), and the cursor shows a hand over checkboxes. Non-checkbox mouse input
  * falls through to RichEdit's default handling. */
@@ -1054,26 +1061,24 @@ static LRESULT CALLBACK nw_body_sub(HWND h, UINT msg, WPARAM wp, LPARAM lp,
     if (msg == WM_LBUTTONDOWN) {
         POINTL pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         int cp = (int)SendMessageW(h, EM_CHARFROMPOS, 0, (LPARAM)&pt);
-        if (cp >= 0) {
-            int len; char* buf = nw_body_text(h, &len);
-            if (buf) {
-                size_t mo; int ck;
-                int hit = markdown_task_at(buf, (size_t)len, (size_t)cp, &mo, &ck);
-                free(buf);
-                if (hit) { nw_toggle_task(nw, h, mo, ck); return 0; }  /* consume */
+        int tab = nw_tab_of_edit(nw, h);
+        if (cp >= 0 && tab >= 0) {
+            size_t dn; const Deco* dd = nw_decos(nw, tab, &dn, NULL);
+            size_t mo; int ck;
+            if (dd && markdown_task_from_decos(dd, dn, (size_t)cp, &mo, &ck)) {
+                nw_toggle_task(nw, h, mo, ck); return 0;   /* consume */
             }
         }
     } else if (msg == WM_SETCURSOR && LOWORD(lp) == HTCLIENT) {
         POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
         POINTL pt = { p.x, p.y };
         int cp = (int)SendMessageW(h, EM_CHARFROMPOS, 0, (LPARAM)&pt);
-        if (cp >= 0) {
-            int len; char* buf = nw_body_text(h, &len);
-            if (buf) {
-                size_t mo; int ck;
-                int hit = markdown_task_at(buf, (size_t)len, (size_t)cp, &mo, &ck);
-                free(buf);
-                if (hit) { SetCursor(LoadCursorW(NULL, MAKEINTRESOURCEW(32649))); return TRUE; }  /* IDC_HAND */
+        int tab = nw_tab_of_edit(nw, h);
+        if (cp >= 0 && tab >= 0) {
+            size_t dn; const Deco* dd = nw_decos(nw, tab, &dn, NULL);
+            size_t mo; int ck;
+            if (dd && markdown_task_from_decos(dd, dn, (size_t)cp, &mo, &ck)) {
+                SetCursor(LoadCursorW(NULL, MAKEINTRESOURCEW(32649))); return TRUE;  /* IDC_HAND */
             }
         }
     }
