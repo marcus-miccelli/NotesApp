@@ -1,9 +1,6 @@
 CC      := gcc
 WINDRES := windres
 VERSION := 1.0.0
-# Capture LOCALAPPDATA from Windows environment and export it for recipes
-LOCALAPPDATA := $(shell cmd /c echo %LOCALAPPDATA% 2>/dev/null)
-export LOCALAPPDATA
 # -MMD -MP emit per-object .d files so edits to a header recompile every .c
 # that includes it (without this, e.g. growing a struct in a shared header
 # silently mismatches sizeof across translation units).
