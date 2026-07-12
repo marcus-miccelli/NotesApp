@@ -521,6 +521,7 @@ static void nw_load_tab(NoteWin* nw, int i) {
     SetWindowTextA(nw->tab[i].edit, body);
     free(txt);
     nw->tab[i].cache_dirty = 1;
+    nw->tab[i].last_reveal_sig = 0;
 }
 
 /* Save tab i's body, prefixing the current name as "# name". */
