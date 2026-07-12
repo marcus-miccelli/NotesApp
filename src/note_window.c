@@ -286,13 +286,6 @@ static void nw_tab_rect(NoteWin* nw, HWND hwnd, int i, RECT* r) {
     int top = nw_top_gutter(hwnd);
     SetRect(r, l, top, l + w, top + nw_s(hwnd, TITLE_CONTENT_H));
 }
-static void nw_close_rect(NoteWin* nw, HWND hwnd, int i, RECT* r) {
-    RECT t;
-    nw_tab_rect(nw, hwnd, i, &t);
-    int top = t.top + nw_s(hwnd, TAB_TOP_GAP);
-    int bottom = t.bottom;
-    SetRect(r, t.right - nw_s(hwnd, TAB_CLOSE_W), top, t.right, bottom);
-}
 static void nw_plus_rect(NoteWin* nw, HWND hwnd, RECT* r) {
     int w = nw_tab_w(nw, hwnd);
     int tab_top = nw_top_gutter(hwnd);
@@ -302,6 +295,26 @@ static void nw_plus_rect(NoteWin* nw, HWND hwnd, RECT* r) {
     int visible_left = nw_strip_left(hwnd) + nw->ntabs * w;
     SetRect(r, visible_left - nw_s(hwnd, PLUS_OVERLAP), top,
             visible_left + visible_size, bottom);
+}
+
+/* Animated left edge of tab i. The dragged tab rides the cursor, clamped to
+ * [strip_left, last slot's left edge] — NOT strip_right: with few tabs
+ * nw_tab_w clamps to TAB_MAX and slots end far left of strip_right, and the
+ * wider bound would let the tab drag past the + button into empty strip.
+ * anim_x is only trusted while anim_on (slide animation). */
+static int nw_tab_draw_x(NoteWin* nw, HWND hwnd, int i) {
+    if (nw->dragging && i == nw->drag_tab) {
+        int w  = nw_tab_w(nw, hwnd);
+        int x  = nw->drag_x - nw->drag_dx;
+        int lo = nw_strip_left(hwnd);
+        int hi = lo + (nw->ntabs - 1) * w;
+        if (x < lo) x = lo;
+        if (x > hi) x = hi;
+        return x;
+    }
+    if (nw->anim_on) return (int)nw->anim_x[i];
+    RECT r; nw_tab_rect(nw, hwnd, i, &r);
+    return r.left;
 }
 
 static TabHit nw_tab_hit(NoteWin* nw, HWND hwnd, int cx, int cy, int* out_idx) {
@@ -1257,24 +1270,57 @@ static LRESULT nw_handle_key(NoteWin* nw, HWND hwnd, const MSGFILTER* mf) {
     return 0;
 }
 
+/* Label + ✕ for tab i with its left edge at x (width w). Shared by the strip
+ * loop and the floating dragged tab. */
+static void nw_paint_tab_decor(NoteWin* nw, HWND hwnd, int i, int x, int w) {
+    GfxD2D* g = nw->gfx;
+    RECT r; nw_tab_rect(nw, hwnd, i, &r);          /* top/bottom only */
+    int isact = (i == nw->active);
+    int ishot = (i == nw->hot_tab);
+
+    NoteMeta* m = nw_note_meta(nw, i);
+    wchar_t wname[128];
+    MultiByteToWideChar(CP_ACP, 0, m && m->name[0] ? m->name : "Untitled", -1, wname, 128);
+
+    RECT tr = { x + nw_s(hwnd, 12), r.top + nw_s(hwnd, TAB_TOP_GAP),
+                x + w - nw_s(hwnd, TAB_CLOSE_W) - nw_s(hwnd, 4), r.bottom - 1 };
+    unsigned lc = isact ? COL_TEXT
+                : (ishot ? RGB(0xc9,0xc9,0xd0) : RGB(0x8a,0x8a,0x90));
+    gfx_text(g, wname, tr, GFX_FMT_LABEL, lc);
+
+    RECT xr = { x + w - nw_s(hwnd, TAB_CLOSE_W), r.top + nw_s(hwnd, TAB_TOP_GAP),
+                x + w, r.bottom };
+    int overx = (ishot && nw->hot_close);
+    if (overx) gfx_fill_tab(g, xr, nw_s(hwnd, TAB_RADIUS), RGB(0x3a,0x3a,0x40));
+    gfx_text(g, L"\x2715", xr, GFX_FMT_CLOSE, overx ? RGB(0xff,0xff,0xff) : RGB(0xc0,0xc0,0xc8));
+}
+
 /* Draw the tab strip with Direct2D: + button fill behind, tab fills back-to-
- * front (top corners rounded, antialiased), then labels, ✕ glyphs, and the +
- * glyph. Colors come from the existing palette. */
+ * front (top corners rounded, antialiased), then labels and ✕ glyphs, the +
+ * glyph, and finally the dragged tab floating on top of everything (after the
+ * + so it covers it in the overlap zone). Colors from the existing palette. */
 static void nw_paint_tabs(NoteWin* nw, HWND hwnd) {
     GfxD2D* g = nw->gfx;
     int radius = nw_s(hwnd, TAB_RADIUS);
+    int w = nw_tab_w(nw, hwnd);
+    int drag = nw->dragging ? nw->drag_tab : -1;
 
     RECT pr; nw_plus_rect(nw, hwnd, &pr);
     if (nw->hot_plus) gfx_fill_tab(g, pr, radius, COL_HOVER);
 
     for (int i = nw->ntabs - 1; i >= 0; i--) {
+        if (i == drag) continue;
         RECT r; nw_tab_rect(nw, hwnd, i, &r);
+        int x = nw_tab_draw_x(nw, hwnd, i);
         int isact = (i == nw->active);
         int ishot = (i == nw->hot_tab);
 
-        int fill_left = r.left;
-        if (i > 0) fill_left -= radius;
-        RECT shape = { fill_left, r.top + nw_s(hwnd, TAB_TOP_GAP), r.right, r.bottom };
+        /* extend under the left neighbor only while visually flush with it —
+         * the extension exists to be covered by the neighbor's later paint;
+         * when a slide opens a gap it would show as a bare square stub */
+        int fill_left = x;
+        if (i > 0 && x - nw_tab_draw_x(nw, hwnd, i - 1) <= w) fill_left -= radius;
+        RECT shape = { fill_left, r.top + nw_s(hwnd, TAB_TOP_GAP), x + w, r.bottom };
 
         unsigned fill = COL_BG;
         if (isact)      fill = COL_TAB_ACT;
@@ -1283,28 +1329,21 @@ static void nw_paint_tabs(NoteWin* nw, HWND hwnd) {
     }
 
     for (int i = 0; i < nw->ntabs; i++) {
-        RECT r; nw_tab_rect(nw, hwnd, i, &r);
-        int isact = (i == nw->active);
-        int ishot = (i == nw->hot_tab);
-
-        NoteMeta* m = nw_note_meta(nw, i);
-        wchar_t wname[128];
-        MultiByteToWideChar(CP_ACP, 0, m && m->name[0] ? m->name : "Untitled", -1, wname, 128);
-
-        RECT tr = { r.left + nw_s(hwnd, 12), r.top + nw_s(hwnd, TAB_TOP_GAP),
-                    r.right - nw_s(hwnd, TAB_CLOSE_W) - nw_s(hwnd, 4), r.bottom - 1 };
-        unsigned lc = isact ? COL_TEXT
-                    : (ishot ? RGB(0xc9,0xc9,0xd0) : RGB(0x8a,0x8a,0x90));
-        gfx_text(g, wname, tr, GFX_FMT_LABEL, lc);
-
-        RECT xr; nw_close_rect(nw, hwnd, i, &xr);
-        int overx = (ishot && nw->hot_close);
-        if (overx) gfx_fill_tab(g, xr, radius, RGB(0x3a,0x3a,0x40));
-        gfx_text(g, L"\x2715", xr, GFX_FMT_CLOSE, overx ? RGB(0xff,0xff,0xff) : RGB(0xc0,0xc0,0xc8));
+        if (i == drag) continue;
+        nw_paint_tab_decor(nw, hwnd, i, nw_tab_draw_x(nw, hwnd, i), w);
     }
 
     RECT pg = pr; pg.left += radius;
     gfx_text(g, L"\x002B", pg, GFX_FMT_PLUS, nw->hot_plus ? RGB(0xff,0xff,0xff) : RGB(0x9a,0x9a,0xa2));
+
+    if (drag >= 0) {
+        RECT r; nw_tab_rect(nw, hwnd, drag, &r);
+        int x = nw_tab_draw_x(nw, hwnd, drag);
+        /* no radius left-extension: drawn on top, nothing covers it */
+        RECT shape = { x, r.top + nw_s(hwnd, TAB_TOP_GAP), x + w, r.bottom };
+        gfx_fill_tab(g, shape, radius, COL_TAB_ACT);   /* dragged tab is active */
+        nw_paint_tab_decor(nw, hwnd, drag, x, w);
+    }
 
     if (nw->rename_edit) {
         RECT er; nw_rename_rect(nw, hwnd, &er);
@@ -1572,8 +1611,15 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE:
         if (nw && GetCapture() == hwnd && nw->drag_tab >= 0) {
             int x = GET_X_LPARAM(lp);
-            if (!nw->dragging && abs(x - nw->press_x) > DRAG_THRESHOLD) nw->dragging = 1;
+            if (!nw->dragging && abs(x - nw->press_x) > DRAG_THRESHOLD) {
+                nw->dragging = 1;
+                /* the drag branch returns before the hover code below, so
+                 * press-time hot state would go stale and paint a displaced
+                 * neighbor as hovered while it moves */
+                nw->hot_tab = -1; nw->hot_close = 0; nw->hot_plus = 0;
+            }
             if (nw->dragging) {
+                nw->drag_x = x;
                 int w = nw_tab_w(nw, hwnd);
                 int center = x - nw->drag_dx + w / 2;      /* dragged tab center */
                 int target = (center - nw_strip_left(hwnd)) / w;
@@ -1589,8 +1635,11 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     nw->active = target;
                     nw->drag_tab = target;
                     nw_sync_winmeta(nw);
-                    InvalidateRect(hwnd, NULL, TRUE);
                 }
+                /* D2D clears and repaints the whole target every frame; the
+                 * sub-rect + FALSE only skips the redundant GDI erase */
+                RECT bar; GetClientRect(hwnd, &bar); bar.bottom = nw_titlebar_h(hwnd);
+                InvalidateRect(hwnd, &bar, FALSE);
             }
             return 0;
         }
