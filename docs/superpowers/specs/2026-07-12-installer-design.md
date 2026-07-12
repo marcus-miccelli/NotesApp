@@ -1,7 +1,7 @@
 # Design: QuickNote Windows installer (Inno Setup)
 
 Date: 2026-07-12
-Status: Approved
+Status: Approved (referee-reviewed; fixes folded in)
 
 ## Context
 
@@ -35,37 +35,58 @@ Inno Setup script. Key directives:
 - `AppId` — a GUID generated once and hardcoded in the script. Stable
   across versions so upgrades replace in place (no duplicate entry in
   Settings → Apps).
-- `AppName=QuickNote`, `AppVersion` taken from a `/DAppVersion=…`
-  compiler define passed by make (single source of truth in the Makefile).
+- `AppName=QuickNote`, `AppPublisher=Marcus Miccelli`, `AppVersion` taken
+  from a `/DAppVersion="…"` compiler define passed by make (quoted; single
+  source of truth in the Makefile). `VersionInfoVersion={#AppVersion}`
+  stamps the setup exe's version resource.
 - `PrivilegesRequired=lowest` → per-user.
+- `ArchitecturesAllowed=x64compatible` +
+  `ArchitecturesInstallIn64BitMode=x64compatible` — 64-bit mingw exe;
+  refuse incompatible architectures.
 - `DefaultDirName={localappdata}\Programs\QuickNote`.
 - `[Files]` — `quicknote.exe` only.
-- `[Icons]` — Start menu shortcut in `{userprograms}` (this is what makes
-  the app indexable by Start-menu search). **No desktop icon** (YAGNI; app
-  lives in tray).
+- `[Icons]` — exactly one entry: `{userprograms}\QuickNote` (i.e.
+  `Start Menu\Programs\QuickNote.lnk`) → `{app}\quicknote.exe`. Uses
+  `{userprograms}` directly — **no `{group}`/`DefaultGroupName`** (no
+  program-group folder). This shortcut is what makes the app indexable by
+  Start-menu search. **No desktop icon** (YAGNI; app lives in tray).
 - `[Tasks]` — one task `startupicon`, description "Start QuickNote when
   Windows starts", checked by default.
 - `[Registry]` — when `startupicon` task selected: value
-  `QuickNote = "{app}\quicknote.exe"` under
-  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, flag
-  `uninsdeletevalue` so uninstall removes it.
+  `QuickNote = """{app}\quicknote.exe"""` (quoted — survives paths with
+  spaces) under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`,
+  flag `uninsdeletevalue` so uninstall removes it.
 - `[Run]` — post-install "Launch QuickNote" checkbox
   (`postinstall nowait skipifsilent`).
-- `CloseApplications=yes` — Restart Manager closes a running
-  quicknote.exe before overwrite on upgrade.
+- **Running-app handling (upgrade + uninstall):** Restart Manager alone
+  is unreliable for a tray app (session-end messages target top-level
+  windows), so the app gains a named mutex and the script declares it:
+  - `main.c`: `CreateMutexW(NULL, FALSE, L"QuickNoteAppMutex");` at
+    startup, handle deliberately held for process lifetime. Detection
+    only — **no single-instance behavior change** (result ignored).
+  - `.iss`: `AppMutex=QuickNoteAppMutex` — Setup *and* the uninstaller
+    prompt the user to close QuickNote before continuing, instead of a
+    silent rename-on-reboot leaving the old instance running.
+  - `CloseApplications=yes` kept as second line of defense.
 - `OutputDir=..\dist`, `OutputBaseFilename=quicknote-setup-{#AppVersion}`.
 - Uninstaller: auto-registered by Inno in Settings → Apps. Removes exe,
   shortcut, Run value. **Never touches `%APPDATA%\quickNote`** (user
   notes survive uninstall; no `[UninstallDelete]` for data).
-- `SetupIconFile=..\assets\quicknote.ico` — installer exe gets the app icon.
+- `SetupIconFile=..\assets\quicknote.ico` — installer exe gets the app
+  icon; `UninstallDisplayIcon={app}\quicknote.exe` — Apps-list entry
+  shows it too.
 
 ### 2. Makefile additions
 
 - `VERSION := 1.0.0` near the top (single source of truth).
-- `installer` phony target, depends on `quicknote.exe`:
-  - Locates `ISCC.exe`: try `ISCC` on PATH, fall back to
-    `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`.
-  - Runs `ISCC /DAppVersion=$(VERSION) installer/quicknote.iss`.
+- `installer` phony target, depends on `quicknote.exe`. Recipes run under
+  MSYS2 bash, so the Windows path must be POSIX-style and quoted
+  (spaces + parens in `Program Files (x86)`):
+  - Locate: `command -v ISCC` on PATH, else fall back to
+    `"/c/Program Files (x86)/Inno Setup 6/ISCC.exe"`; if neither exists,
+    fail with a clear `install Inno Setup 6 (winget install
+    JRSoftware.InnoSetup)` message.
+  - Run: `"$$ISCC" /DAppVersion="$(VERSION)" installer/quicknote.iss`.
   - Output: `dist/quicknote-setup-$(VERSION).exe`.
 - `dist/` added to `.gitignore`.
 - `clean` leaves `dist/` alone (release artifacts are deliberate).
@@ -86,6 +107,9 @@ make installer
 gh release create v1.0.0 dist/quicknote-setup-1.0.0.exe --title "QuickNote 1.0.0"
 ```
 
+The release tag must match the Makefile `VERSION` — manual step, no
+enforcement (accepted; scripting it is YAGNI at one release).
+
 ## Testing
 
 Installer logic is not unit-testable; verification is a human checklist
@@ -96,18 +120,23 @@ Installer logic is not unit-testable; verification is a human checklist
 3. Start menu search "QuickNote" finds the app; launches.
 4. Autostart task checked → Run value present in HKCU (verifiable via
    `reg query`).
-5. Re-run installer (upgrade path) with app running → app closed,
-   replaced, single Apps entry.
+5. Re-run installer (upgrade path) with app running → AppMutex prompt
+   asks to close QuickNote; after closing, replaced cleanly, single Apps
+   entry, no reboot-pending state.
 6. Uninstall from Settings → Apps → exe/shortcut/Run value gone;
    `%APPDATA%\quickNote` notes intact.
+7. Uninstall **with app running** → uninstaller prompts to close first
+   (AppMutex); no orphaned files after.
 
-Registry/file assertions (4, 6) are scriptable post-hoc checks; the
-install/launch/search steps are human-verified.
+Registry/file assertions (4, 6, 7) are scriptable post-hoc checks; the
+install/launch/search steps are human-verified. The mutex line in
+`main.c` is app code but has no observable logic to unit-test (detection
+handle only); gate is `make` clean + existing suite green.
 
 ## Scope boundaries
 
-- **In:** `.iss` script, Makefile target + VERSION, `.gitignore`, README
-  install docs.
+- **In:** `.iss` script, one-line `AppMutex` mutex in `main.c`, Makefile
+  target + VERSION, `.gitignore`, README install docs.
 - **Out (deferred):** code signing, CI release automation, desktop icon,
   MSI/winget/store packaging, in-app version resource stamping,
   auto-update.
@@ -121,3 +150,9 @@ install/launch/search steps are human-verified.
   would stack duplicate entries; hardcoding it in the committed `.iss`
   prevents this.
 - **Autostart entry orphaned** — prevented by `uninsdeletevalue`.
+- **Tray app ignores Restart Manager** — mitigated by the
+  `AppMutex`/named-mutex pair (referee finding); `CloseApplications`
+  retained as backup. Residual: user can cancel the close prompt →
+  Setup falls back to rename-on-reboot (standard Inno behavior).
+- **Mutex name collision** — `QuickNoteAppMutex` is process-global but
+  obscure; collision would only make Setup over-prompt, never corrupt.
