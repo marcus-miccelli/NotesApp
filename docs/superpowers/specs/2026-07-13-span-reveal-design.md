@@ -76,9 +76,13 @@ and its **closing** marker hide at span close (`d_leave_span`,
   extent — which powers the trigger helper below and keeps `nw_restyle`'s
   own sel-specific parse and the cache structurally identical.
 - **New pure query.** `size_t markdown_reveal_sig(const Deco* d, size_t n,
-  size_t caret)` — a deterministic signature of the set of inline span
-  extents the caret touches (e.g. fold of `aux_start*2654435761u ^ aux_len`
-  over touching extents; 0 when none). **It must consider only entries with
+  size_t lo, size_t hi)` — a deterministic signature of the set of inline
+  span extents the reveal window `[lo, hi]` touches (caret = `lo == hi`;
+  a selection passes its full range so the trigger agrees with the builder
+  gate, which reveals against the whole selection). Fold of
+  `aux_start*2654435761u + aux_len*40503u` **summed** over touching
+  extents; 0 when none. Summed, not XORed — a span's opening and closing
+  marker hides share one extent, and XOR would cancel the pair to 0. **It must consider only entries with
   `kind == DECO_HIDE && aux_len > 0`** — `DECO_LINK` stores a url-*pool*
   offset in `aux_start` and `DECO_TASK` a mark offset; treating either as a
   source extent would produce spurious touches. Two caret positions produce
