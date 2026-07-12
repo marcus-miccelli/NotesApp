@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #define NOTE_CLASS   L"StickyNoteWindow"
 #define ID_EDIT      1001
@@ -1056,9 +1057,13 @@ static void nw_anim_cancel(NoteWin* nw, HWND hwnd) {
 }
 
 /* Normal end of a drag, from WM_LBUTTONUP or WM_CAPTURECHANGED (capture can
- * vanish without a buttonup — modal MessageBox, external SetCapture). */
+ * vanish without a buttonup — modal MessageBox, external SetCapture). Seeds
+ * the released tab's anim_x from its floating position so the running timer
+ * glides it into its slot; the read must precede clearing `dragging`, which
+ * selects nw_tab_draw_x's floating branch. */
 static void nw_drag_release(NoteWin* nw, HWND hwnd) {
-    (void)hwnd;
+    if (nw->dragging && nw->drag_tab >= 0 && nw->anim_on)
+        nw->anim_x[nw->drag_tab] = (float)nw_tab_draw_x(nw, hwnd, nw->drag_tab);
     nw->drag_tab = -1;
     nw->dragging = 0;
 }
@@ -1599,7 +1604,10 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 nw_activate(nw, hwnd, idx);
                 RECT r; nw_tab_rect(nw, hwnd, idx, &r);
                 nw->drag_tab = idx;
-                nw->drag_dx  = GET_X_LPARAM(lp) - r.left;
+                /* draw-x, not slot-x: on a mid-settle re-grab the tab is
+                 * still sliding and a slot offset would jump it under the
+                 * cursor (identical to r.left when idle) */
+                nw->drag_dx  = GET_X_LPARAM(lp) - nw_tab_draw_x(nw, hwnd, idx);
                 nw->press_x  = GET_X_LPARAM(lp);
                 nw->dragging = 0;
                 SetCapture(hwnd);
@@ -1617,6 +1625,17 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                  * press-time hot state would go stale and paint a displaced
                  * neighbor as hovered while it moves */
                 nw->hot_tab = -1; nw->hot_close = 0; nw->hot_plus = 0;
+                /* re-grab mid-settle keeps current anim_x — re-seeding would
+                 * teleport tabs that are still sliding */
+                if (!nw->anim_on) {
+                    for (int i = 0; i < nw->ntabs; i++) {
+                        RECT tr2; nw_tab_rect(nw, hwnd, i, &tr2);
+                        nw->anim_x[i] = (float)tr2.left;
+                    }
+                    nw->anim_on = 1;
+                }
+                QueryPerformanceCounter(&nw->anim_last);
+                SetTimer(hwnd, IDT_TABANIM, TAB_ANIM_TICK_MS, NULL);
             }
             if (nw->dragging) {
                 nw->drag_x = x;
@@ -1627,11 +1646,19 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (target > nw->ntabs - 1) target = nw->ntabs - 1;
                 if (target != nw->drag_tab) {
                     NoteTab moved = nw->tab[nw->drag_tab];
+                    float   mx    = nw->anim_x[nw->drag_tab];
                     if (target > nw->drag_tab)
-                        for (int k = nw->drag_tab; k < target; k++) nw->tab[k] = nw->tab[k+1];
+                        for (int k = nw->drag_tab; k < target; k++) {
+                            nw->tab[k]    = nw->tab[k+1];
+                            nw->anim_x[k] = nw->anim_x[k+1];
+                        }
                     else
-                        for (int k = nw->drag_tab; k > target; k--) nw->tab[k] = nw->tab[k-1];
-                    nw->tab[target] = moved;
+                        for (int k = nw->drag_tab; k > target; k--) {
+                            nw->tab[k]    = nw->tab[k-1];
+                            nw->anim_x[k] = nw->anim_x[k-1];
+                        }
+                    nw->tab[target]    = moved;
+                    nw->anim_x[target] = mx;
                     nw->active = target;
                     nw->drag_tab = target;
                     nw_sync_winmeta(nw);
@@ -1777,6 +1804,33 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_TIMER:
+        if (wp == IDT_TABANIM && nw) {
+            LARGE_INTEGER now, f;
+            QueryPerformanceCounter(&now);
+            QueryPerformanceFrequency(&f);
+            float dt = (float)(now.QuadPart - nw->anim_last.QuadPart) * 1000.0f
+                     / (float)f.QuadPart;
+            nw->anim_last = now;
+            if (dt > 100.0f) dt = 100.0f;   /* absorb modal/menu stalls */
+            float k = 1.0f - expf(-dt / TAB_ANIM_TAU_MS);
+
+            int settled = 1;
+            for (int i = 0; i < nw->ntabs; i++) {
+                if (nw->dragging && i == nw->drag_tab) continue;
+                RECT r; nw_tab_rect(nw, hwnd, i, &r);   /* live slot: resize/DPI self-corrects */
+                float target = (float)r.left;
+                nw->anim_x[i] += (target - nw->anim_x[i]) * k;
+                if (fabsf(nw->anim_x[i] - target) > 0.5f) settled = 0;
+                else nw->anim_x[i] = target;
+            }
+            if (settled && !nw->dragging) {
+                KillTimer(hwnd, IDT_TABANIM);
+                nw->anim_on = 0;
+            }
+            RECT bar; GetClientRect(hwnd, &bar); bar.bottom = nw_titlebar_h(hwnd);
+            InvalidateRect(hwnd, &bar, FALSE);
+            return 0;
+        }
         if (wp == IDT_DEBOUNCE && nw && nw_edit(nw)) {
             HWND e = nw_edit(nw);
             KillTimer(hwnd, IDT_DEBOUNCE);
