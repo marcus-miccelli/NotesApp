@@ -60,13 +60,14 @@ Inno Setup script. Key directives:
   (`postinstall nowait skipifsilent`).
 - **Running-app handling (upgrade + uninstall):** Restart Manager alone
   is unreliable for a tray app (session-end messages target top-level
-  windows), so the app gains a named mutex and the script declares it:
-  - `main.c`: `CreateMutexW(NULL, FALSE, L"QuickNoteAppMutex");` at
-    startup, handle deliberately held for process lifetime. Detection
-    only — **no single-instance behavior change** (result ignored).
-  - `.iss`: `AppMutex=QuickNoteAppMutex` — Setup *and* the uninstaller
-    prompt the user to close QuickNote before continuing, instead of a
-    silent rename-on-reboot leaving the old instance running.
+  windows). The app **already** owns a named mutex for its process
+  lifetime — `quickNote_SingleInstance_Mutex`, created in `main.c`
+  (single-instance handoff; the first instance never closes the handle).
+  The script reuses it — **no app code change**:
+  - `.iss`: `AppMutex=quickNote_SingleInstance_Mutex` — Setup *and* the
+    uninstaller prompt the user to close QuickNote before continuing,
+    instead of a silent rename-on-reboot leaving the old instance
+    running.
   - `CloseApplications=yes` kept as second line of defense.
 - `OutputDir=..\dist`, `OutputBaseFilename=quicknote-setup-{#AppVersion}`.
 - Uninstaller: auto-registered by Inno in Settings → Apps. Removes exe,
@@ -129,14 +130,13 @@ Installer logic is not unit-testable; verification is a human checklist
    (AppMutex); no orphaned files after.
 
 Registry/file assertions (4, 6, 7) are scriptable post-hoc checks; the
-install/launch/search steps are human-verified. The mutex line in
-`main.c` is app code but has no observable logic to unit-test (detection
-handle only); gate is `make` clean + existing suite green.
+install/launch/search steps are human-verified.
 
 ## Scope boundaries
 
-- **In:** `.iss` script, one-line `AppMutex` mutex in `main.c`, Makefile
-  target + VERSION, `.gitignore`, README install docs.
+- **In:** `.iss` script, Makefile target + VERSION, `.gitignore`, README
+  install docs. No app code changes (`AppMutex` reuses the existing
+  single-instance mutex).
 - **Out (deferred):** code signing, CI release automation, desktop icon,
   MSI/winget/store packaging, in-app version resource stamping,
   auto-update.
@@ -150,9 +150,11 @@ handle only); gate is `make` clean + existing suite green.
   would stack duplicate entries; hardcoding it in the committed `.iss`
   prevents this.
 - **Autostart entry orphaned** — prevented by `uninsdeletevalue`.
-- **Tray app ignores Restart Manager** — mitigated by the
-  `AppMutex`/named-mutex pair (referee finding); `CloseApplications`
-  retained as backup. Residual: user can cancel the close prompt →
-  Setup falls back to rename-on-reboot (standard Inno behavior).
-- **Mutex name collision** — `QuickNoteAppMutex` is process-global but
-  obscure; collision would only make Setup over-prompt, never corrupt.
+- **Tray app ignores Restart Manager** — mitigated by `AppMutex`
+  reusing the app's existing single-instance mutex (referee finding);
+  `CloseApplications` retained as backup. Residual: user can cancel the
+  close prompt → Setup falls back to rename-on-reboot (standard Inno
+  behavior).
+- **Mutex rename hazard** — if `main.c` ever renames
+  `quickNote_SingleInstance_Mutex`, the `.iss` `AppMutex` must follow;
+  a comment beside each names the other.
