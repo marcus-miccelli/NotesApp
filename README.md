@@ -4,6 +4,23 @@ Native Windows sticky-note app in C. Each window holds multiple notes as tabs,
 editing Markdown `.md` files with live preview. Windows and tab order are
 restored on launch.
 
+## Install
+
+Download `quicknote-setup-<version>.exe` from
+[GitHub Releases](../../releases) and run it. Installs per-user (no admin
+prompt), adds **QuickNote** to the Start menu, and offers a
+"start with Windows" checkbox. Uninstall from Settings → Apps; your notes
+in `%APPDATA%\quickNote` are never deleted.
+
+> **SmartScreen note:** the installer is unsigned, so Windows may show
+> "Windows protected your PC". Click **More info → Run anyway**.
+
+To build the installer yourself: install
+[Inno Setup 6](https://jrsoftware.org/isinfo.php)
+(`winget install JRSoftware.InnoSetup`), then:
+
+    make installer   # emits dist/quicknote-setup-<version>.exe
+
 ## Build
 
 Requires MinGW-w64 (gcc + windres) and GNU Make.
