@@ -330,4 +330,31 @@ void test_markdown(void) {
         size_t mo = 0; int ck = 0;
         CHECK(markdown_task_at(t, strlen(t), 2, &mo, &ck) == 0);
     }
+
+    /* --- DECO_TASK emission + from_decos queries --- */
+    {
+        const char* t = "- [ ] a\n- [x] b";
+        Deco* d = NULL; char* pool = NULL;
+        size_t n = markdown_decorate(t, strlen(t), (size_t)-1, 0, &d, &pool);
+        /* first item: mark at 3, checkbox range [2,5); second: mark at 11 */
+        int t0 = 0, t1 = 0;
+        for (size_t i = 0; i < n; i++) if (d[i].kind == DECO_TASK) {
+            if (d[i].start == 2 && d[i].len == 3 && d[i].aux_start == 3 && d[i].number == 0) t0 = 1;
+            if (d[i].aux_start == 11 && d[i].number == 1) t1 = 1;
+        }
+        CHECK(t0 == 1);   /* "- [ ]" -> unchecked checkbox at [2,5) */
+        CHECK(t1 == 1);   /* "- [x]" -> checked */
+
+        /* markdown_task_from_decos over the same list */
+        size_t mo = 0; int ck = 9;
+        CHECK(markdown_task_from_decos(d, n, 2, &mo, &ck) == 1);  /* on '[' */
+        CHECK(mo == 3 && ck == 0);
+        CHECK(markdown_task_from_decos(d, n, 3, &mo, &ck) == 1);  /* on mark */
+        CHECK(markdown_task_from_decos(d, n, 4, &mo, &ck) == 1);  /* on ']' */
+        CHECK(markdown_task_from_decos(d, n, 6, &mo, &ck) == 0);  /* in text */
+
+        /* markdown_fmt_from_decos: the checked item's content is struck */
+        CHECK((markdown_fmt_from_decos(d, n, 14) & MD_FMT_STRIKE) != 0); /* inside "b" */
+        free(d); free(pool);
+    }
 }
