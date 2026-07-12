@@ -14,7 +14,7 @@ typedef unsigned MdFmt;
 #define MD_FMT_QUOTE (1u<<8)
 #define MD_FMT_LINK (1u<<9)
 
-typedef enum { DECO_FMT, DECO_HIDE, DECO_PARA, DECO_LINK } DecoKind;
+typedef enum { DECO_FMT, DECO_HIDE, DECO_PARA, DECO_LINK, DECO_TASK } DecoKind;
 typedef enum { PARA_NONE, PARA_BULLET, PARA_NUMBER, PARA_QUOTE } ParaKind;
 
 typedef struct {
@@ -42,5 +42,10 @@ MdFmt markdown_fmt_at(const char* text, size_t len, size_t caret);
  * else return 0. */
 int markdown_task_at(const char* text, size_t len, size_t off,
                      size_t* mark_off, int* checked);
+
+/* Pure queries over an existing decoration list (from markdown_decorate). */
+MdFmt markdown_fmt_from_decos(const Deco* d, size_t n, size_t caret);
+int   markdown_task_from_decos(const Deco* d, size_t n, size_t off,
+                               size_t* mark_off, int* checked);
 
 #endif

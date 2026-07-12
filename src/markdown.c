@@ -311,6 +311,15 @@ static int d_text(MD_TEXTTYPE tt, const MD_CHAR* text, MD_SIZE size, void* ud) {
             size_t cb1 = c->li_task_mark_off + 2;                               /* past ']' */
             push_hide(c, ls, cb0 - ls);        /* "- " */
             if (off > cb1) push_hide(c, cb1, off - cb1);   /* space(s) after "]" */
+            /* checkbox range [cb0, cb1) as a DECO_TASK: aux_start=mark, number=checked.
+             * Unconditional push (never reveal-gated) so task hit-test always works.
+             * push may drop on OOM; overwrite the new deco only if it landed. */
+            push(c, DECO_TASK, cb0, cb1 - cb0, 0, PARA_NONE, 0);
+            if (c->count) {
+                Deco* td = &c->arr[c->count - 1];
+                td->aux_start = c->li_task_mark_off;
+                td->number = c->li_task_checked ? 1 : 0;
+            }
         } else {
             push_hide(c, ls, off - ls);        /* "- "/"N. " */
         }
@@ -365,9 +374,7 @@ size_t markdown_decorate(const char* text, size_t len,
     return c.count;
 }
 
-MdFmt markdown_fmt_at(const char* text, size_t len, size_t caret) {
-    Deco* d = NULL; char* pool = NULL;
-    size_t n = markdown_decorate(text, len, (size_t)-1, 0, &d, &pool);
+MdFmt markdown_fmt_from_decos(const Deco* d, size_t n, size_t caret) {
     MdFmt f = 0;
     for (size_t i = 0; i < n; i++) {
         if (d[i].kind != DECO_FMT) continue;
@@ -376,56 +383,37 @@ MdFmt markdown_fmt_at(const char* text, size_t len, size_t caret) {
         if ((caret > a && caret <= b) || (caret >= a && caret < b))
             f |= d[i].fmt;
     }
-    free(d); free(pool);
     f &= ~(MdFmt)(MD_FMT_H1 | MD_FMT_H2 | MD_FMT_H3);   /* headings not toggles */
     return f;
 }
 
-typedef struct {
-    size_t off;       /* query offset */
-    int    found;
-    size_t mark_off;
-    int    checked;
-} TaskCtx;
-
-static int tq_enter_block(MD_BLOCKTYPE t, void* detail, void* ud) {
-    TaskCtx* c = (TaskCtx*)ud;
-    if (t == MD_BLOCK_LI) {
-        MD_BLOCK_LI_DETAIL* d = (MD_BLOCK_LI_DETAIL*)detail;
-        if (d->is_task) {
-            size_t m  = (size_t)d->task_mark_offset;
-            size_t lo = m > 0 ? m - 1 : 0;   /* '[' */
-            size_t hi = m + 2;               /* one past ']' */
-            if (c->off >= lo && c->off < hi) {
-                c->found = 1;
-                c->mark_off = m;
-                c->checked = (d->task_mark == 'x' || d->task_mark == 'X');
-            }
+int markdown_task_from_decos(const Deco* d, size_t n, size_t off,
+                             size_t* mark_off, int* checked) {
+    for (size_t i = 0; i < n; i++) {
+        if (d[i].kind != DECO_TASK) continue;
+        size_t a = d[i].start, b = a + d[i].len;
+        if (off >= a && off < b) {
+            if (mark_off) *mark_off = d[i].aux_start;
+            if (checked)  *checked  = d[i].number;
+            return 1;
         }
     }
     return 0;
 }
-static int tq_noop_b(MD_BLOCKTYPE t, void* d, void* u) { (void)t;(void)d;(void)u; return 0; }
-static int tq_noop_s(MD_SPANTYPE t, void* d, void* u)  { (void)t;(void)d;(void)u; return 0; }
-static int tq_noop_t(MD_TEXTTYPE t, const MD_CHAR* x, MD_SIZE n, void* u) {
-    (void)t;(void)x;(void)n;(void)u; return 0;
+
+MdFmt markdown_fmt_at(const char* text, size_t len, size_t caret) {
+    Deco* d = NULL; char* pool = NULL;
+    size_t n = markdown_decorate(text, len, (size_t)-1, 0, &d, &pool);
+    MdFmt f = markdown_fmt_from_decos(d, n, caret);
+    free(d); free(pool);
+    return f;
 }
 
 int markdown_task_at(const char* text, size_t len, size_t off,
                      size_t* mark_off, int* checked) {
-    TaskCtx c; memset(&c, 0, sizeof c); c.off = off;
-    MD_PARSER p; memset(&p, 0, sizeof p);
-    p.abi_version = 0;
-    p.flags = MD_DIALECT_COMMONMARK | MD_FLAG_STRIKETHROUGH | MD_FLAG_TASKLISTS;
-    p.enter_block = tq_enter_block;
-    p.leave_block = tq_noop_b;
-    p.enter_span  = tq_noop_s;
-    p.leave_span  = tq_noop_s;
-    p.text        = tq_noop_t;
-    md_parse(text, (MD_SIZE)len, &p, &c);
-    if (c.found) {
-        if (mark_off) *mark_off = c.mark_off;
-        if (checked)  *checked  = c.checked;
-    }
-    return c.found;
+    Deco* d = NULL; char* pool = NULL;
+    size_t n = markdown_decorate(text, len, (size_t)-1, 0, &d, &pool);
+    int hit = markdown_task_from_decos(d, n, off, mark_off, checked);
+    free(d); free(pool);
+    return hit;
 }

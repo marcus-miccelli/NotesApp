@@ -92,6 +92,10 @@ typedef struct {
     HWND edit;        /* this tab's body RichEdit */
     int  last_lines;  /* line count at last restyle; a change forces whole-doc */
     size_t last_caret_para;   /* paragraph offset last revealed (per tab) */
+    Deco*  cache_decos;   /* cached hide-all decoration list (NULL until built) */
+    size_t cache_n;
+    char*  cache_pool;    /* url pool backing cached DECO_LINK aux (currently unread; freed each reparse) */
+    int    cache_dirty;   /* 1 => text changed since the cache was built */
 } NoteTab;
 
 typedef struct {
@@ -400,6 +404,35 @@ static char* nw_body_text(HWND edit, int* out_len) {
     return buf;
 }
 
+/* Free a tab's cached parse (free(NULL) is safe). */
+static void nw_cache_free(NoteTab* t) {
+    free(t->cache_decos); t->cache_decos = NULL;
+    free(t->cache_pool);  t->cache_pool = NULL;
+    t->cache_n = 0;
+}
+
+/* Return the tab's cached sel-independent (hide-all) decoration list, reparsing
+ * only when the tab's text changed since the last parse (or no cache yet).
+ * *n / *pool receive the count / url pool (either may be NULL). */
+static const Deco* nw_decos(NoteWin* nw, int tab, size_t* n, const char** pool) {
+    NoteTab* t = &nw->tab[tab];
+    if (t->cache_decos == NULL || t->cache_dirty) {
+        int len; char* buf = nw_body_text(t->edit, &len);
+        if (buf) {
+            Deco* d = NULL; char* p = NULL;
+            size_t cn = markdown_decorate(buf, (size_t)len, (size_t)-1, 0, &d, &p);
+            free(buf);
+            nw_cache_free(t);
+            t->cache_decos = d; t->cache_n = cn; t->cache_pool = p;
+            t->cache_dirty = 0;
+        }
+        /* buf NULL (OOM): keep whatever we had (may be NULL) */
+    }
+    if (n)    *n    = t->cache_n;
+    if (pool) *pool = t->cache_pool;
+    return t->cache_decos;
+}
+
 /* Is the line starting at ls an ATX heading? (<=3 spaces, 1-6 '#', then space
  * or line end) — matching the CommonMark headings the renderer styles. */
 static int nw_line_is_heading(const char* buf, int len, LONG ls) {
@@ -442,13 +475,12 @@ static void nw_update_toggles(NoteWin* nw) {
     HWND e = nw_edit(nw);
 
     CHARRANGE sel; SendMessageW(e, EM_EXGETSEL, 0, (LPARAM)&sel);
-    int len; char* buf = nw_body_text(e, &len);
-    if (buf) {
-        MdFmt f = markdown_fmt_at(buf, (size_t)len, (size_t)sel.cpMin);
+    size_t dn; const Deco* dd = nw_decos(nw, nw->active, &dn, NULL);
+    if (dd) {
+        MdFmt f = markdown_fmt_from_decos(dd, dn, (size_t)sel.cpMin);
         s[0] = (f & MD_FMT_BOLD)   != 0;
         s[1] = (f & MD_FMT_ITALIC) != 0;
         s[2] = (f & MD_FMT_STRIKE) != 0;
-        free(buf);
     }
 
     PARAFORMAT2 pf; memset(&pf, 0, sizeof pf); pf.cbSize = sizeof pf;
@@ -487,6 +519,7 @@ static void nw_load_tab(NoteWin* nw, int i) {
     }
     SetWindowTextA(nw->tab[i].edit, body);
     free(txt);
+    nw->tab[i].cache_dirty = 1;
 }
 
 /* Save tab i's body, prefixing the current name as "# name". */
@@ -694,6 +727,7 @@ static void nw_apply_format(NoteWin* nw) {
 /* Persist + restyle the body now (used after a programmatic edit), with redraw
  * suppressed to avoid flicker. */
 static void nw_reformat_now(NoteWin* nw) {
+    nw->tab[nw->active].cache_dirty = 1;
     HWND e = nw_edit(nw);
     SendMessageW(e, WM_SETREDRAW, FALSE, 0);
     nw_save_tab(nw, nw->active);
@@ -962,6 +996,12 @@ static void nw_activate(NoteWin* nw, HWND hwnd, int i) {
  * last tab) or fixes active + redraws. */
 static void nw_remove_tab(NoteWin* nw, HWND hwnd, int i) {
     for (int k = i; k < nw->ntabs - 1; k++) nw->tab[k] = nw->tab[k+1];
+    /* the struct copy duplicated the top slot's cache pointer into the slot
+     * below; null the vacated top slot so it is not double-freed or reused */
+    nw->tab[nw->ntabs - 1].cache_decos = NULL;
+    nw->tab[nw->ntabs - 1].cache_pool  = NULL;
+    nw->tab[nw->ntabs - 1].cache_n     = 0;
+    nw->tab[nw->ntabs - 1].cache_dirty = 1;
     nw->ntabs--;
     if (nw->ntabs == 0) {
         WinMeta* w = nw_win(nw);
@@ -985,6 +1025,7 @@ static void nw_remove_tab(NoteWin* nw, HWND hwnd, int i) {
 static void nw_close_tab(NoteWin* nw, HWND hwnd, int i) {
     if (i < 0 || i >= nw->ntabs) return;
     nw_save_tab(nw, i);
+    nw_cache_free(&nw->tab[i]);
     if (nw->tab[i].edit) DestroyWindow(nw->tab[i].edit);
     nw->tab[i].edit = NULL;
     nw_remove_tab(nw, hwnd, i);
@@ -1003,6 +1044,13 @@ static void nw_toggle_task(NoteWin* nw, HWND edit, size_t mark_off, int checked)
     nw_reformat_now(nw);
 }
 
+/* Tab index whose body edit is `edit`, or -1. */
+static int nw_tab_of_edit(NoteWin* nw, HWND edit) {
+    for (int i = 0; i < nw->ntabs; i++)
+        if (nw->tab[i].edit == edit) return i;
+    return -1;
+}
+
 /* Body RichEdit subclass: plain-click a task checkbox toggles it (caret stays
  * put), and the cursor shows a hand over checkboxes. Non-checkbox mouse input
  * falls through to RichEdit's default handling. */
@@ -1013,26 +1061,24 @@ static LRESULT CALLBACK nw_body_sub(HWND h, UINT msg, WPARAM wp, LPARAM lp,
     if (msg == WM_LBUTTONDOWN) {
         POINTL pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         int cp = (int)SendMessageW(h, EM_CHARFROMPOS, 0, (LPARAM)&pt);
-        if (cp >= 0) {
-            int len; char* buf = nw_body_text(h, &len);
-            if (buf) {
-                size_t mo; int ck;
-                int hit = markdown_task_at(buf, (size_t)len, (size_t)cp, &mo, &ck);
-                free(buf);
-                if (hit) { nw_toggle_task(nw, h, mo, ck); return 0; }  /* consume */
+        int tab = nw_tab_of_edit(nw, h);
+        if (cp >= 0 && tab >= 0) {
+            size_t dn; const Deco* dd = nw_decos(nw, tab, &dn, NULL);
+            size_t mo; int ck;
+            if (dd && markdown_task_from_decos(dd, dn, (size_t)cp, &mo, &ck)) {
+                nw_toggle_task(nw, h, mo, ck); return 0;   /* consume */
             }
         }
     } else if (msg == WM_SETCURSOR && LOWORD(lp) == HTCLIENT) {
         POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
         POINTL pt = { p.x, p.y };
         int cp = (int)SendMessageW(h, EM_CHARFROMPOS, 0, (LPARAM)&pt);
-        if (cp >= 0) {
-            int len; char* buf = nw_body_text(h, &len);
-            if (buf) {
-                size_t mo; int ck;
-                int hit = markdown_task_at(buf, (size_t)len, (size_t)cp, &mo, &ck);
-                free(buf);
-                if (hit) { SetCursor(LoadCursorW(NULL, MAKEINTRESOURCEW(32649))); return TRUE; }  /* IDC_HAND */
+        int tab = nw_tab_of_edit(nw, h);
+        if (cp >= 0 && tab >= 0) {
+            size_t dn; const Deco* dd = nw_decos(nw, tab, &dn, NULL);
+            size_t mo; int ck;
+            if (dd && markdown_task_from_decos(dd, dn, (size_t)cp, &mo, &ck)) {
+                SetCursor(LoadCursorW(NULL, MAKEINTRESOURCEW(32649))); return TRUE;  /* IDC_HAND */
             }
         }
     }
@@ -1045,6 +1091,8 @@ static void nw_add_tab(NoteWin* nw, HWND hwnd) {
     NoteMeta* m = app_new_note(nw->app);
     if (!m) return;
     int i = nw->ntabs++;
+    nw->tab[i].cache_decos = NULL; nw->tab[i].cache_pool = NULL;
+    nw->tab[i].cache_n = 0; nw->tab[i].cache_dirty = 1;
     snprintf(nw->tab[i].id, sizeof nw->tab[i].id, "%s", m->id);
     nw->tab[i].edit = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
         WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
@@ -1080,6 +1128,7 @@ static void nw_delete_note(NoteWin* nw, HWND hwnd) {
     char id[16]; strcpy(id, nw->tab[i].id);
     AppState* app = nw->app;
     /* Destroy the edit first (no save), then delete from disk, then remove tab. */
+    nw_cache_free(&nw->tab[i]);
     if (nw->tab[i].edit) DestroyWindow(nw->tab[i].edit);
     nw->tab[i].edit = NULL;
     app_delete_note(app, id);
@@ -1315,6 +1364,8 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         nw->active = (w && w->active < nw->ntabs) ? w->active : 0;
         if (nw->active < 0) nw->active = 0;
         for (int i = 0; i < nw->ntabs; i++) {
+            nw->tab[i].cache_decos = NULL; nw->tab[i].cache_pool = NULL;
+            nw->tab[i].cache_n = 0; nw->tab[i].cache_dirty = 1;
             snprintf(nw->tab[i].id, sizeof nw->tab[i].id, "%s", w->tabs[i]);
             nw->tab[i].edit = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
                 WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL
@@ -1637,6 +1688,10 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (HIWORD(wp) == EN_CHANGE && LOWORD(wp) == ID_EDIT) {
+            /* Only the active edit is visible/editable, so EN_CHANGE always comes
+             * from it; a background tab's text changes only via nw_load_tab (which
+             * dirties that specific tab). Marking active here is therefore correct. */
+            nw->tab[nw->active].cache_dirty = 1;
             SetTimer(hwnd, IDT_DEBOUNCE, DEBOUNCE_MS, NULL);  /* coalesces */
         }
         return 0;
@@ -1655,6 +1710,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
         nw_registry_remove(hwnd);
         if (nw) {
+            for (int i = 0; i < nw->ntabs; i++) nw_cache_free(&nw->tab[i]);
             if (nw->gfx) { gfx_destroy(nw->gfx); nw->gfx = NULL; }
             if (nw->rename_font) { DeleteObject(nw->rename_font); nw->rename_font = NULL; }
             free(nw);
