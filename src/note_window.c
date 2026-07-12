@@ -94,7 +94,7 @@ typedef struct {
     size_t last_caret_para;   /* paragraph offset last revealed (per tab) */
     Deco*  cache_decos;   /* cached hide-all decoration list (NULL until built) */
     size_t cache_n;
-    char*  cache_pool;    /* url pool backing cached DECO_LINK aux (unused by C3a readers; freed each reparse) */
+    char*  cache_pool;    /* url pool backing cached DECO_LINK aux (currently unread; freed each reparse) */
     int    cache_dirty;   /* 1 => text changed since the cache was built */
 } NoteTab;
 
@@ -1688,6 +1688,9 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (HIWORD(wp) == EN_CHANGE && LOWORD(wp) == ID_EDIT) {
+            /* Only the active edit is visible/editable, so EN_CHANGE always comes
+             * from it; a background tab's text changes only via nw_load_tab (which
+             * dirties that specific tab). Marking active here is therefore correct. */
             nw->tab[nw->active].cache_dirty = 1;
             SetTimer(hwnd, IDT_DEBOUNCE, DEBOUNCE_MS, NULL);  /* coalesces */
         }
