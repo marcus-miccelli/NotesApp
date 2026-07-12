@@ -10,7 +10,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show) {
      * a later launch finds the first instance's message-only owner window and
      * posts the registered "new window" message to it, so a second click opens
      * another window in the SAME process (shared tray + shared preferences.json)
-     * rather than spawning a duplicate process that would fight over the file. */
+     * rather than spawning a duplicate process that would fight over the file.
+     * The mutex name must stay in sync with AppMutex in installer/quicknote.iss
+     * — the installer uses it to detect and close a running instance. */
     HANDLE inst_mutex = CreateMutexW(NULL, TRUE, L"quickNote_SingleInstance_Mutex");
     if (inst_mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
         HWND owner = FindWindowExW(HWND_MESSAGE, NULL, TRAY_OWNER_CLASS, NULL);
