@@ -20,6 +20,9 @@
 #define ID_RENAME    1003
 #define DEBOUNCE_MS  150
 #define IDT_DEBOUNCE 1
+#define IDT_TABANIM  2       /* tab slide animation tick (drag reorder) */
+#define TAB_ANIM_TICK_MS 10
+#define TAB_ANIM_TAU_MS  70.0f  /* easing time constant; ~5*tau to fully settle */
 
 /* Formatting sidebar buttons. */
 #define IDB_BOLD     1100
@@ -117,6 +120,11 @@ typedef struct {
     int   drag_dx;    /* cursor x-offset from the tab's left edge at press */
     int   press_x;    /* x at button-down, used for threshold detection */
     int   dragging;   /* 1 once the threshold has been exceeded */
+    /* tab slide animation (drag reorder) */
+    float anim_x[WIN_MAX_TABS]; /* current draw-x of each tab's left edge */
+    int   anim_on;    /* 1 while IDT_TABANIM is alive */
+    LARGE_INTEGER anim_last;    /* QPC stamp of the previous tick */
+    int   drag_x;     /* latest cursor x while dragging */
     /* rename-overlay state (Task 10) */
     HWND  rename_edit;  /* NULL when no rename in progress */
     HFONT rename_font;  /* font for the rename edit; freed on commit */
@@ -1022,7 +1030,28 @@ static void nw_remove_tab(NoteWin* nw, HWND hwnd, int i) {
 
 /* Close tab i: save its content, destroy its edit, then remove it from the
  * window.  If it was the last tab the window itself closes. */
+/* Cancel any drag / slide animation outright (snap, no settle). Called before
+ * structural tab changes: mouse capture routes messages here but does not
+ * block them, so add/close/delete/rename CAN arrive mid-drag (middle-click,
+ * EN_MSGFILTER shortcuts) and would desync drag_tab/anim_x from the shifted
+ * tab[]. Clear state BEFORE ReleaseCapture so WM_CAPTURECHANGED no-ops. */
+static void nw_anim_cancel(NoteWin* nw, HWND hwnd) {
+    nw->drag_tab = -1;
+    nw->dragging = 0;
+    if (nw->anim_on) { KillTimer(hwnd, IDT_TABANIM); nw->anim_on = 0; }
+    if (GetCapture() == hwnd) ReleaseCapture();
+}
+
+/* Normal end of a drag, from WM_LBUTTONUP or WM_CAPTURECHANGED (capture can
+ * vanish without a buttonup — modal MessageBox, external SetCapture). */
+static void nw_drag_release(NoteWin* nw, HWND hwnd) {
+    (void)hwnd;
+    nw->drag_tab = -1;
+    nw->dragging = 0;
+}
+
 static void nw_close_tab(NoteWin* nw, HWND hwnd, int i) {
+    nw_anim_cancel(nw, hwnd);
     if (i < 0 || i >= nw->ntabs) return;
     nw_save_tab(nw, i);
     nw_cache_free(&nw->tab[i]);
@@ -1087,6 +1116,7 @@ static LRESULT CALLBACK nw_body_sub(HWND h, UINT msg, WPARAM wp, LPARAM lp,
 
 /* Create a new note + its body RichEdit as a new tab and make it active. */
 static void nw_add_tab(NoteWin* nw, HWND hwnd) {
+    nw_anim_cancel(nw, hwnd);
     if (nw->ntabs >= WIN_MAX_TABS) return;
     NoteMeta* m = app_new_note(nw->app);
     if (!m) return;
@@ -1121,6 +1151,7 @@ static void nw_add_tab(NoteWin* nw, HWND hwnd) {
  * Reuses nw_remove_tab so only the deleted tab is removed; if it was the last
  * tab the window closes.  No save — the note is being deleted. */
 static void nw_delete_note(NoteWin* nw, HWND hwnd) {
+    nw_anim_cancel(nw, hwnd);
     if (MessageBoxW(hwnd, L"Delete this note permanently?",
                     L"Delete", MB_YESNO | MB_ICONWARNING) != IDYES) return;
     int i = nw->active;
@@ -1163,6 +1194,7 @@ static void nw_rename_rect(NoteWin* nw, HWND hwnd, RECT* r) {
 
 static void nw_begin_rename(NoteWin* nw, HWND hwnd) {
     if (nw->rename_edit || nw->ntabs == 0) return;
+    nw_anim_cancel(nw, hwnd);
     int i = nw->active;
     NoteMeta* m = prefs_find(&nw->app->prefs, nw->tab[i].id);
     nw->rename_tab = i;
@@ -1598,11 +1630,11 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_LBUTTONUP:
-        if (nw && GetCapture() == hwnd) {
-            ReleaseCapture();
-            nw->drag_tab = -1;
-            nw->dragging = 0;
-        }
+        if (nw && GetCapture() == hwnd)
+            ReleaseCapture();   /* WM_CAPTURECHANGED does the actual release */
+        return 0;
+    case WM_CAPTURECHANGED:
+        if (nw && nw->drag_tab >= 0) nw_drag_release(nw, hwnd);
         return 0;
     case WM_MBUTTONDOWN:
         if (nw) {
