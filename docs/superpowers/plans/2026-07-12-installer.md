@@ -175,27 +175,36 @@ Before the `clean:` rule, add:
 ```make
 # Installer (Inno Setup 6). Recipes run under MSYS2 bash, so fallback paths
 # are POSIX-style and quoted. Checked in order: PATH, the winget per-user
-# location (%LOCALAPPDATA%\Programs — cygpath converts it), then the classic
-# machine-wide "Program Files (x86)" location.
+# location, then the classic machine-wide "Program Files (x86)" location.
+# The per-user dir is resolved with `cygpath -F 28` (CSIDL_LOCAL_APPDATA,
+# via the Windows API) because recipe environments here scrub Windows env
+# vars like LOCALAPPDATA — the same phenomenon as TMP/TEMP at the top of
+# this file. Both candidates are overridable (used by the error-path test).
+# MSYS2_ARG_CONV_EXCL="/D" stops the MSYS runtime from rewriting the
+# /DAppVersion switch into a Windows path (which ISCC would then reject as
+# a second script filename).
+ISCC_LOCAL := $(shell cygpath -u -F 28 2>/dev/null)/Programs/Inno Setup 6/ISCC.exe
+ISCC_PF    := /c/Program Files (x86)/Inno Setup 6/ISCC.exe
+
 installer: quicknote.exe
 	@ISCC="$$(command -v ISCC || true)"; \
-	LOCAL="$$(cygpath -u "$$LOCALAPPDATA" 2>/dev/null)"; \
-	for p in "$$LOCAL/Programs/Inno Setup 6/ISCC.exe" \
-	         "/c/Program Files (x86)/Inno Setup 6/ISCC.exe"; do \
+	for p in "$(ISCC_LOCAL)" "$(ISCC_PF)"; do \
 	  if [ -z "$$ISCC" ] && [ -x "$$p" ]; then ISCC="$$p"; fi; \
 	done; \
 	if [ -z "$$ISCC" ]; then \
 	  echo "error: ISCC.exe not found — install Inno Setup 6: winget install JRSoftware.InnoSetup"; \
 	  exit 1; \
 	fi; \
-	"$$ISCC" /DAppVersion="$(VERSION)" installer/quicknote.iss
+	MSYS2_ARG_CONV_EXCL="/D" "$$ISCC" /DAppVersion="$(VERSION)" installer/quicknote.iss
 ```
 
 (Tab-indented recipe lines, as in the rest of the Makefile. On this
-machine winget installed Inno Setup per-user, so the `$LOCALAPPDATA`
-fallback is the one that fires — verified:
+machine winget installed Inno Setup per-user, so `ISCC_LOCAL` is the
+candidate that fires — verified:
 `/c/Users/Marcus/AppData/Local/Programs/Inno Setup 6/ISCC.exe` exists,
-nothing in `Program Files (x86)`, nothing on PATH.)
+nothing in `Program Files (x86)`, nothing on PATH. `cygpath -u -F 28`
+verified to return `/c/Users/Marcus/AppData/Local` from inside a recipe
+even though `$LOCALAPPDATA` is empty there.)
 
 - [ ] **Step 3: Verify**
 
@@ -210,13 +219,16 @@ Expected: ISCC runs, `Successful compile`, file exists with the version from the
 
 Run immediately after Step 3 so `quicknote.exe` is already up to date —
 the stripped PATH below has no gcc, and a stale exe would otherwise
-trigger a rebuild that fails for the wrong reason. `LOCALAPPDATA` is
-overridden to defeat the per-user fallback; the `Program Files (x86)`
-fallback is absent on this machine (verified), so the error path fires.
+trigger a rebuild that fails for the wrong reason. `ISCC_LOCAL` is
+overridden to defeat the per-user candidate; the `Program Files (x86)`
+candidate is absent on this machine (verified), so the error path fires.
 
 ```bash
-PATH="/usr/bin" LOCALAPPDATA="C:\\nonexistent" make installer 2>&1 | tail -2; echo "exit=$?"
+PATH="/usr/bin:/c/msys64/usr/bin" make installer ISCC_LOCAL=/nonexistent 2>&1 | tail -2; echo "exit=$?"
 ```
+
+(make lives in `/c/msys64/usr/bin` on this machine, so that dir stays on
+the stripped PATH — it contains no ISCC, so the assertion is unchanged.)
 
 Expected: the clear `error: ISCC.exe not found — install Inno Setup 6…` message (not a cryptic bash error). (`tail` exit code is 0; the message text is the assertion here.)
 
