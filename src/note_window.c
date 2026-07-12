@@ -14,12 +14,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #define NOTE_CLASS   L"StickyNoteWindow"
 #define ID_EDIT      1001
 #define ID_RENAME    1003
 #define DEBOUNCE_MS  150
 #define IDT_DEBOUNCE 1
+#define IDT_TABANIM  2       /* tab slide animation tick (drag reorder) */
+#define TAB_ANIM_TICK_MS 10
+#define TAB_ANIM_TAU_MS  70.0f  /* easing time constant; ~5*tau to fully settle */
 
 /* Formatting sidebar buttons. */
 #define IDB_BOLD     1100
@@ -117,6 +121,11 @@ typedef struct {
     int   drag_dx;    /* cursor x-offset from the tab's left edge at press */
     int   press_x;    /* x at button-down, used for threshold detection */
     int   dragging;   /* 1 once the threshold has been exceeded */
+    /* tab slide animation (drag reorder) */
+    float anim_x[WIN_MAX_TABS]; /* current draw-x of each tab's left edge */
+    int   anim_on;    /* 1 while IDT_TABANIM is alive */
+    LARGE_INTEGER anim_last;    /* QPC stamp of the previous tick */
+    int   drag_x;     /* latest cursor x while dragging */
     /* rename-overlay state (Task 10) */
     HWND  rename_edit;  /* NULL when no rename in progress */
     HFONT rename_font;  /* font for the rename edit; freed on commit */
@@ -278,13 +287,6 @@ static void nw_tab_rect(NoteWin* nw, HWND hwnd, int i, RECT* r) {
     int top = nw_top_gutter(hwnd);
     SetRect(r, l, top, l + w, top + nw_s(hwnd, TITLE_CONTENT_H));
 }
-static void nw_close_rect(NoteWin* nw, HWND hwnd, int i, RECT* r) {
-    RECT t;
-    nw_tab_rect(nw, hwnd, i, &t);
-    int top = t.top + nw_s(hwnd, TAB_TOP_GAP);
-    int bottom = t.bottom;
-    SetRect(r, t.right - nw_s(hwnd, TAB_CLOSE_W), top, t.right, bottom);
-}
 static void nw_plus_rect(NoteWin* nw, HWND hwnd, RECT* r) {
     int w = nw_tab_w(nw, hwnd);
     int tab_top = nw_top_gutter(hwnd);
@@ -294,6 +296,26 @@ static void nw_plus_rect(NoteWin* nw, HWND hwnd, RECT* r) {
     int visible_left = nw_strip_left(hwnd) + nw->ntabs * w;
     SetRect(r, visible_left - nw_s(hwnd, PLUS_OVERLAP), top,
             visible_left + visible_size, bottom);
+}
+
+/* Animated left edge of tab i. The dragged tab rides the cursor, clamped to
+ * [strip_left, last slot's left edge] — NOT strip_right: with few tabs
+ * nw_tab_w clamps to TAB_MAX and slots end far left of strip_right, and the
+ * wider bound would let the tab drag past the + button into empty strip.
+ * anim_x is only trusted while anim_on (slide animation). */
+static int nw_tab_draw_x(NoteWin* nw, HWND hwnd, int i) {
+    if (nw->dragging && i == nw->drag_tab) {
+        int w  = nw_tab_w(nw, hwnd);
+        int x  = nw->drag_x - nw->drag_dx;
+        int lo = nw_strip_left(hwnd);
+        int hi = lo + (nw->ntabs - 1) * w;
+        if (x < lo) x = lo;
+        if (x > hi) x = hi;
+        return x;
+    }
+    if (nw->anim_on) return (int)nw->anim_x[i];
+    RECT r; nw_tab_rect(nw, hwnd, i, &r);
+    return r.left;
 }
 
 static TabHit nw_tab_hit(NoteWin* nw, HWND hwnd, int cx, int cy, int* out_idx) {
@@ -1022,7 +1044,32 @@ static void nw_remove_tab(NoteWin* nw, HWND hwnd, int i) {
 
 /* Close tab i: save its content, destroy its edit, then remove it from the
  * window.  If it was the last tab the window itself closes. */
+/* Cancel any drag / slide animation outright (snap, no settle). Called before
+ * structural tab changes: mouse capture routes messages here but does not
+ * block them, so add/close/delete/rename CAN arrive mid-drag (middle-click,
+ * EN_MSGFILTER shortcuts) and would desync drag_tab/anim_x from the shifted
+ * tab[]. Clear state BEFORE ReleaseCapture so WM_CAPTURECHANGED no-ops. */
+static void nw_anim_cancel(NoteWin* nw, HWND hwnd) {
+    nw->drag_tab = -1;
+    nw->dragging = 0;
+    if (nw->anim_on) { KillTimer(hwnd, IDT_TABANIM); nw->anim_on = 0; }
+    if (GetCapture() == hwnd) ReleaseCapture();
+}
+
+/* Normal end of a drag, from WM_LBUTTONUP or WM_CAPTURECHANGED (capture can
+ * vanish without a buttonup — modal MessageBox, external SetCapture). Seeds
+ * the released tab's anim_x from its floating position so the running timer
+ * glides it into its slot; the read must precede clearing `dragging`, which
+ * selects nw_tab_draw_x's floating branch. */
+static void nw_drag_release(NoteWin* nw, HWND hwnd) {
+    if (nw->dragging && nw->drag_tab >= 0 && nw->anim_on)
+        nw->anim_x[nw->drag_tab] = (float)nw_tab_draw_x(nw, hwnd, nw->drag_tab);
+    nw->drag_tab = -1;
+    nw->dragging = 0;
+}
+
 static void nw_close_tab(NoteWin* nw, HWND hwnd, int i) {
+    nw_anim_cancel(nw, hwnd);
     if (i < 0 || i >= nw->ntabs) return;
     nw_save_tab(nw, i);
     nw_cache_free(&nw->tab[i]);
@@ -1087,6 +1134,7 @@ static LRESULT CALLBACK nw_body_sub(HWND h, UINT msg, WPARAM wp, LPARAM lp,
 
 /* Create a new note + its body RichEdit as a new tab and make it active. */
 static void nw_add_tab(NoteWin* nw, HWND hwnd) {
+    nw_anim_cancel(nw, hwnd);
     if (nw->ntabs >= WIN_MAX_TABS) return;
     NoteMeta* m = app_new_note(nw->app);
     if (!m) return;
@@ -1121,6 +1169,7 @@ static void nw_add_tab(NoteWin* nw, HWND hwnd) {
  * Reuses nw_remove_tab so only the deleted tab is removed; if it was the last
  * tab the window closes.  No save — the note is being deleted. */
 static void nw_delete_note(NoteWin* nw, HWND hwnd) {
+    nw_anim_cancel(nw, hwnd);
     if (MessageBoxW(hwnd, L"Delete this note permanently?",
                     L"Delete", MB_YESNO | MB_ICONWARNING) != IDYES) return;
     int i = nw->active;
@@ -1163,6 +1212,7 @@ static void nw_rename_rect(NoteWin* nw, HWND hwnd, RECT* r) {
 
 static void nw_begin_rename(NoteWin* nw, HWND hwnd) {
     if (nw->rename_edit || nw->ntabs == 0) return;
+    nw_anim_cancel(nw, hwnd);
     int i = nw->active;
     NoteMeta* m = prefs_find(&nw->app->prefs, nw->tab[i].id);
     nw->rename_tab = i;
@@ -1225,24 +1275,57 @@ static LRESULT nw_handle_key(NoteWin* nw, HWND hwnd, const MSGFILTER* mf) {
     return 0;
 }
 
+/* Label + ✕ for tab i with its left edge at x (width w). Shared by the strip
+ * loop and the floating dragged tab. */
+static void nw_paint_tab_decor(NoteWin* nw, HWND hwnd, int i, int x, int w) {
+    GfxD2D* g = nw->gfx;
+    RECT r; nw_tab_rect(nw, hwnd, i, &r);          /* top/bottom only */
+    int isact = (i == nw->active);
+    int ishot = (i == nw->hot_tab);
+
+    NoteMeta* m = nw_note_meta(nw, i);
+    wchar_t wname[128];
+    MultiByteToWideChar(CP_ACP, 0, m && m->name[0] ? m->name : "Untitled", -1, wname, 128);
+
+    RECT tr = { x + nw_s(hwnd, 12), r.top + nw_s(hwnd, TAB_TOP_GAP),
+                x + w - nw_s(hwnd, TAB_CLOSE_W) - nw_s(hwnd, 4), r.bottom - 1 };
+    unsigned lc = isact ? COL_TEXT
+                : (ishot ? RGB(0xc9,0xc9,0xd0) : RGB(0x8a,0x8a,0x90));
+    gfx_text(g, wname, tr, GFX_FMT_LABEL, lc);
+
+    RECT xr = { x + w - nw_s(hwnd, TAB_CLOSE_W), r.top + nw_s(hwnd, TAB_TOP_GAP),
+                x + w, r.bottom };
+    int overx = (ishot && nw->hot_close);
+    if (overx) gfx_fill_tab(g, xr, nw_s(hwnd, TAB_RADIUS), RGB(0x3a,0x3a,0x40));
+    gfx_text(g, L"\x2715", xr, GFX_FMT_CLOSE, overx ? RGB(0xff,0xff,0xff) : RGB(0xc0,0xc0,0xc8));
+}
+
 /* Draw the tab strip with Direct2D: + button fill behind, tab fills back-to-
- * front (top corners rounded, antialiased), then labels, ✕ glyphs, and the +
- * glyph. Colors come from the existing palette. */
+ * front (top corners rounded, antialiased), then labels and ✕ glyphs, the +
+ * glyph, and finally the dragged tab floating on top of everything (after the
+ * + so it covers it in the overlap zone). Colors from the existing palette. */
 static void nw_paint_tabs(NoteWin* nw, HWND hwnd) {
     GfxD2D* g = nw->gfx;
     int radius = nw_s(hwnd, TAB_RADIUS);
+    int w = nw_tab_w(nw, hwnd);
+    int drag = nw->dragging ? nw->drag_tab : -1;
 
     RECT pr; nw_plus_rect(nw, hwnd, &pr);
     if (nw->hot_plus) gfx_fill_tab(g, pr, radius, COL_HOVER);
 
     for (int i = nw->ntabs - 1; i >= 0; i--) {
+        if (i == drag) continue;
         RECT r; nw_tab_rect(nw, hwnd, i, &r);
+        int x = nw_tab_draw_x(nw, hwnd, i);
         int isact = (i == nw->active);
         int ishot = (i == nw->hot_tab);
 
-        int fill_left = r.left;
-        if (i > 0) fill_left -= radius;
-        RECT shape = { fill_left, r.top + nw_s(hwnd, TAB_TOP_GAP), r.right, r.bottom };
+        /* extend under the left neighbor only while visually flush with it —
+         * the extension exists to be covered by the neighbor's later paint;
+         * when a slide opens a gap it would show as a bare square stub */
+        int fill_left = x;
+        if (i > 0 && x - nw_tab_draw_x(nw, hwnd, i - 1) <= w) fill_left -= radius;
+        RECT shape = { fill_left, r.top + nw_s(hwnd, TAB_TOP_GAP), x + w, r.bottom };
 
         unsigned fill = COL_BG;
         if (isact)      fill = COL_TAB_ACT;
@@ -1251,28 +1334,21 @@ static void nw_paint_tabs(NoteWin* nw, HWND hwnd) {
     }
 
     for (int i = 0; i < nw->ntabs; i++) {
-        RECT r; nw_tab_rect(nw, hwnd, i, &r);
-        int isact = (i == nw->active);
-        int ishot = (i == nw->hot_tab);
-
-        NoteMeta* m = nw_note_meta(nw, i);
-        wchar_t wname[128];
-        MultiByteToWideChar(CP_ACP, 0, m && m->name[0] ? m->name : "Untitled", -1, wname, 128);
-
-        RECT tr = { r.left + nw_s(hwnd, 12), r.top + nw_s(hwnd, TAB_TOP_GAP),
-                    r.right - nw_s(hwnd, TAB_CLOSE_W) - nw_s(hwnd, 4), r.bottom - 1 };
-        unsigned lc = isact ? COL_TEXT
-                    : (ishot ? RGB(0xc9,0xc9,0xd0) : RGB(0x8a,0x8a,0x90));
-        gfx_text(g, wname, tr, GFX_FMT_LABEL, lc);
-
-        RECT xr; nw_close_rect(nw, hwnd, i, &xr);
-        int overx = (ishot && nw->hot_close);
-        if (overx) gfx_fill_tab(g, xr, radius, RGB(0x3a,0x3a,0x40));
-        gfx_text(g, L"\x2715", xr, GFX_FMT_CLOSE, overx ? RGB(0xff,0xff,0xff) : RGB(0xc0,0xc0,0xc8));
+        if (i == drag) continue;
+        nw_paint_tab_decor(nw, hwnd, i, nw_tab_draw_x(nw, hwnd, i), w);
     }
 
     RECT pg = pr; pg.left += radius;
     gfx_text(g, L"\x002B", pg, GFX_FMT_PLUS, nw->hot_plus ? RGB(0xff,0xff,0xff) : RGB(0x9a,0x9a,0xa2));
+
+    if (drag >= 0) {
+        RECT r; nw_tab_rect(nw, hwnd, drag, &r);
+        int x = nw_tab_draw_x(nw, hwnd, drag);
+        /* no radius left-extension: drawn on top, nothing covers it */
+        RECT shape = { x, r.top + nw_s(hwnd, TAB_TOP_GAP), x + w, r.bottom };
+        gfx_fill_tab(g, shape, radius, COL_TAB_ACT);   /* dragged tab is active */
+        nw_paint_tab_decor(nw, hwnd, drag, x, w);
+    }
 
     if (nw->rename_edit) {
         RECT er; nw_rename_rect(nw, hwnd, &er);
@@ -1528,7 +1604,10 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 nw_activate(nw, hwnd, idx);
                 RECT r; nw_tab_rect(nw, hwnd, idx, &r);
                 nw->drag_tab = idx;
-                nw->drag_dx  = GET_X_LPARAM(lp) - r.left;
+                /* draw-x, not slot-x: on a mid-settle re-grab the tab is
+                 * still sliding and a slot offset would jump it under the
+                 * cursor (identical to r.left when idle) */
+                nw->drag_dx  = GET_X_LPARAM(lp) - nw_tab_draw_x(nw, hwnd, idx);
                 nw->press_x  = GET_X_LPARAM(lp);
                 nw->dragging = 0;
                 SetCapture(hwnd);
@@ -1540,8 +1619,26 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE:
         if (nw && GetCapture() == hwnd && nw->drag_tab >= 0) {
             int x = GET_X_LPARAM(lp);
-            if (!nw->dragging && abs(x - nw->press_x) > DRAG_THRESHOLD) nw->dragging = 1;
+            if (!nw->dragging && abs(x - nw->press_x) > DRAG_THRESHOLD) {
+                nw->dragging = 1;
+                /* the drag branch returns before the hover code below, so
+                 * press-time hot state would go stale and paint a displaced
+                 * neighbor as hovered while it moves */
+                nw->hot_tab = -1; nw->hot_close = 0; nw->hot_plus = 0;
+                /* re-grab mid-settle keeps current anim_x — re-seeding would
+                 * teleport tabs that are still sliding */
+                if (!nw->anim_on) {
+                    for (int i = 0; i < nw->ntabs; i++) {
+                        RECT tr2; nw_tab_rect(nw, hwnd, i, &tr2);
+                        nw->anim_x[i] = (float)tr2.left;
+                    }
+                    nw->anim_on = 1;
+                }
+                QueryPerformanceCounter(&nw->anim_last);
+                SetTimer(hwnd, IDT_TABANIM, TAB_ANIM_TICK_MS, NULL);
+            }
             if (nw->dragging) {
+                nw->drag_x = x;
                 int w = nw_tab_w(nw, hwnd);
                 int center = x - nw->drag_dx + w / 2;      /* dragged tab center */
                 int target = (center - nw_strip_left(hwnd)) / w;
@@ -1549,16 +1646,27 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (target > nw->ntabs - 1) target = nw->ntabs - 1;
                 if (target != nw->drag_tab) {
                     NoteTab moved = nw->tab[nw->drag_tab];
+                    float   mx    = nw->anim_x[nw->drag_tab];
                     if (target > nw->drag_tab)
-                        for (int k = nw->drag_tab; k < target; k++) nw->tab[k] = nw->tab[k+1];
+                        for (int k = nw->drag_tab; k < target; k++) {
+                            nw->tab[k]    = nw->tab[k+1];
+                            nw->anim_x[k] = nw->anim_x[k+1];
+                        }
                     else
-                        for (int k = nw->drag_tab; k > target; k--) nw->tab[k] = nw->tab[k-1];
-                    nw->tab[target] = moved;
+                        for (int k = nw->drag_tab; k > target; k--) {
+                            nw->tab[k]    = nw->tab[k-1];
+                            nw->anim_x[k] = nw->anim_x[k-1];
+                        }
+                    nw->tab[target]    = moved;
+                    nw->anim_x[target] = mx;
                     nw->active = target;
                     nw->drag_tab = target;
                     nw_sync_winmeta(nw);
-                    InvalidateRect(hwnd, NULL, TRUE);
                 }
+                /* D2D clears and repaints the whole target every frame; the
+                 * sub-rect + FALSE only skips the redundant GDI erase */
+                RECT bar; GetClientRect(hwnd, &bar); bar.bottom = nw_titlebar_h(hwnd);
+                InvalidateRect(hwnd, &bar, FALSE);
             }
             return 0;
         }
@@ -1598,11 +1706,11 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_LBUTTONUP:
-        if (nw && GetCapture() == hwnd) {
-            ReleaseCapture();
-            nw->drag_tab = -1;
-            nw->dragging = 0;
-        }
+        if (nw && GetCapture() == hwnd)
+            ReleaseCapture();   /* WM_CAPTURECHANGED does the actual release */
+        return 0;
+    case WM_CAPTURECHANGED:
+        if (nw && nw->drag_tab >= 0) nw_drag_release(nw, hwnd);
         return 0;
     case WM_MBUTTONDOWN:
         if (nw) {
@@ -1696,6 +1804,33 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_TIMER:
+        if (wp == IDT_TABANIM && nw) {
+            LARGE_INTEGER now, f;
+            QueryPerformanceCounter(&now);
+            QueryPerformanceFrequency(&f);
+            float dt = (float)(now.QuadPart - nw->anim_last.QuadPart) * 1000.0f
+                     / (float)f.QuadPart;
+            nw->anim_last = now;
+            if (dt > 100.0f) dt = 100.0f;   /* absorb modal/menu stalls */
+            float k = 1.0f - expf(-dt / TAB_ANIM_TAU_MS);
+
+            int settled = 1;
+            for (int i = 0; i < nw->ntabs; i++) {
+                if (nw->dragging && i == nw->drag_tab) continue;
+                RECT r; nw_tab_rect(nw, hwnd, i, &r);   /* live slot: resize/DPI self-corrects */
+                float target = (float)r.left;
+                nw->anim_x[i] += (target - nw->anim_x[i]) * k;
+                if (fabsf(nw->anim_x[i] - target) > 0.5f) settled = 0;
+                else nw->anim_x[i] = target;
+            }
+            if (settled && !nw->dragging) {
+                KillTimer(hwnd, IDT_TABANIM);
+                nw->anim_on = 0;
+            }
+            RECT bar; GetClientRect(hwnd, &bar); bar.bottom = nw_titlebar_h(hwnd);
+            InvalidateRect(hwnd, &bar, FALSE);
+            return 0;
+        }
         if (wp == IDT_DEBOUNCE && nw && nw_edit(nw)) {
             HWND e = nw_edit(nw);
             KillTimer(hwnd, IDT_DEBOUNCE);
