@@ -14,7 +14,6 @@ LDLIBS  := -lgdi32 -lcomctl32 -lole32 -lshell32 -ldwmapi -ld2d1 -ldwrite
 BUILD_TMP   := .build-tmp
 export TMP  := $(BUILD_TMP)
 export TEMP := $(BUILD_TMP)
-export LOCALAPPDATA
 $(shell mkdir -p $(BUILD_TMP))
 
 # GUI app sources (added to as tasks land)
@@ -54,20 +53,27 @@ DEPS := $(APP_OBJ:.o=.d) $(TEST_OBJ:.o=.d)
 
 # Installer (Inno Setup 6). Recipes run under MSYS2 bash, so fallback paths
 # are POSIX-style and quoted. Checked in order: PATH, the winget per-user
-# location (%LOCALAPPDATA%\Programs — cygpath converts it), then the classic
-# machine-wide "Program Files (x86)" location.
+# location, then the classic machine-wide "Program Files (x86)" location.
+# The per-user dir is resolved with `cygpath -F 28` (CSIDL_LOCAL_APPDATA,
+# via the Windows API) because recipe environments here scrub Windows env
+# vars like LOCALAPPDATA — the same phenomenon as TMP/TEMP at the top of
+# this file. Both candidates are overridable (used by the error-path test).
+# MSYS2_ARG_CONV_EXCL="/D" stops the MSYS runtime from rewriting the
+# /DAppVersion switch into a Windows path (which ISCC would then reject as
+# a second script filename).
+ISCC_LOCAL := $(shell cygpath -u -F 28 2>/dev/null)/Programs/Inno Setup 6/ISCC.exe
+ISCC_PF    := /c/Program Files (x86)/Inno Setup 6/ISCC.exe
+
 installer: quicknote.exe
 	@ISCC="$$(command -v ISCC || true)"; \
-	LOCAL="$$(cygpath -u "$$LOCALAPPDATA" 2>/dev/null)"; \
-	for p in "$$LOCAL/Programs/Inno Setup 6/ISCC.exe" \
-	         "/c/Program Files (x86)/Inno Setup 6/ISCC.exe"; do \
+	for p in "$(ISCC_LOCAL)" "$(ISCC_PF)"; do \
 	  if [ -z "$$ISCC" ] && [ -x "$$p" ]; then ISCC="$$p"; fi; \
 	done; \
 	if [ -z "$$ISCC" ]; then \
 	  echo "error: ISCC.exe not found — install Inno Setup 6: winget install JRSoftware.InnoSetup"; \
 	  exit 1; \
 	fi; \
-	"$$ISCC" /DAppVersion="$(VERSION)" installer/quicknote.iss
+	MSYS2_ARG_CONV_EXCL="/D" "$$ISCC" /DAppVersion="$(VERSION)" installer/quicknote.iss
 
 clean:
 	rm -f quicknote.exe stickynotes.exe tests.exe $(APP_OBJ) $(TEST_OBJ) $(RES_OBJ) $(DEPS)
