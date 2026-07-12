@@ -83,9 +83,10 @@ Inno Setup script. Key directives:
 - `installer` phony target, depends on `quicknote.exe`. Recipes run under
   MSYS2 bash, so the Windows path must be POSIX-style and quoted
   (spaces + parens in `Program Files (x86)`):
-  - Locate: `command -v ISCC` on PATH, else fall back to
-    `"/c/Program Files (x86)/Inno Setup 6/ISCC.exe"`; if neither exists,
-    fail with a clear `install Inno Setup 6 (winget install
+  - Locate: `command -v ISCC` on PATH, else the winget per-user location
+    `"$LOCALAPPDATA/Programs/Inno Setup 6/ISCC.exe"` (via `cygpath`),
+    else `"/c/Program Files (x86)/Inno Setup 6/ISCC.exe"`; if none
+    exists, fail with a clear `install Inno Setup 6 (winget install
     JRSoftware.InnoSetup)` message.
   - Run: `"$$ISCC" /DAppVersion="$(VERSION)" installer/quicknote.iss`.
   - Output: `dist/quicknote-setup-$(VERSION).exe`.

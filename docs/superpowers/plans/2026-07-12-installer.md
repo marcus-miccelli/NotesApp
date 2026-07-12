@@ -173,13 +173,17 @@ Change `.PHONY: all app test clean` to:
 Before the `clean:` rule, add:
 
 ```make
-# Installer (Inno Setup 6). Recipes run under MSYS2 bash, so the fallback
-# path is POSIX-style and quoted (spaces + parens in "Program Files (x86)").
-ISCC_FALLBACK := /c/Program Files (x86)/Inno Setup 6/ISCC.exe
-
+# Installer (Inno Setup 6). Recipes run under MSYS2 bash, so fallback paths
+# are POSIX-style and quoted. Checked in order: PATH, the winget per-user
+# location (%LOCALAPPDATA%\Programs — cygpath converts it), then the classic
+# machine-wide "Program Files (x86)" location.
 installer: quicknote.exe
 	@ISCC="$$(command -v ISCC || true)"; \
-	if [ -z "$$ISCC" ] && [ -x "$(ISCC_FALLBACK)" ]; then ISCC="$(ISCC_FALLBACK)"; fi; \
+	LOCAL="$$(cygpath -u "$$LOCALAPPDATA" 2>/dev/null)"; \
+	for p in "$$LOCAL/Programs/Inno Setup 6/ISCC.exe" \
+	         "/c/Program Files (x86)/Inno Setup 6/ISCC.exe"; do \
+	  if [ -z "$$ISCC" ] && [ -x "$$p" ]; then ISCC="$$p"; fi; \
+	done; \
 	if [ -z "$$ISCC" ]; then \
 	  echo "error: ISCC.exe not found — install Inno Setup 6: winget install JRSoftware.InnoSetup"; \
 	  exit 1; \
@@ -187,7 +191,11 @@ installer: quicknote.exe
 	"$$ISCC" /DAppVersion="$(VERSION)" installer/quicknote.iss
 ```
 
-(Tab-indented recipe lines, as in the rest of the Makefile.)
+(Tab-indented recipe lines, as in the rest of the Makefile. On this
+machine winget installed Inno Setup per-user, so the `$LOCALAPPDATA`
+fallback is the one that fires — verified:
+`/c/Users/Marcus/AppData/Local/Programs/Inno Setup 6/ISCC.exe` exists,
+nothing in `Program Files (x86)`, nothing on PATH.)
 
 - [ ] **Step 3: Verify**
 
@@ -202,10 +210,12 @@ Expected: ISCC runs, `Successful compile`, file exists with the version from the
 
 Run immediately after Step 3 so `quicknote.exe` is already up to date —
 the stripped PATH below has no gcc, and a stale exe would otherwise
-trigger a rebuild that fails for the wrong reason.
+trigger a rebuild that fails for the wrong reason. `LOCALAPPDATA` is
+overridden to defeat the per-user fallback; the `Program Files (x86)`
+fallback is absent on this machine (verified), so the error path fires.
 
 ```bash
-PATH="/usr/bin" make installer ISCC_FALLBACK=/nonexistent 2>&1 | tail -2; echo "exit=$?"
+PATH="/usr/bin" LOCALAPPDATA="C:\\nonexistent" make installer 2>&1 | tail -2; echo "exit=$?"
 ```
 
 Expected: the clear `error: ISCC.exe not found — install Inno Setup 6…` message (not a cryptic bash error). (`tail` exit code is 0; the message text is the assertion here.)
