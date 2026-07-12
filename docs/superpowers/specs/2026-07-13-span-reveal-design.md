@@ -1,7 +1,7 @@
 # Design: Span-level reveal for inline markdown markers
 
 Date: 2026-07-13
-Status: Approved
+Status: Approved (referee-reviewed; fixes folded in)
 
 ## Context
 
@@ -44,17 +44,21 @@ char offsets; no new dependencies; C11.
 
 Today an inline span's **opening** marker hide is pushed when the span's
 first text run resolves it (`d_text` resolve loop, `src/markdown.c:277-289`)
-and its **closing** marker hide at span close (`d_span_close`,
-`src/markdown.c:250`) — both gated by the paragraph-level `in_reveal`.
-Changes:
+and its **closing** marker hide at span close (`d_leave_span`,
+`src/markdown.c:250` — note the function is named `d_leave_span`, not
+"span_close") — both gated by the paragraph-level `in_reveal`. Changes:
 
 - **Record, don't push, opening markers.** The open-span stack entry
   (`c->sp[i]`) gains the opening marker's start offset and length, recorded
   where the resolve loop currently pushes the hide. The push moves to span
   close, where the full extent `[open_start, close_end)` is known. md4c
   reports only balanced spans (an unclosed `**abc` is literal text and
-  never reaches the span callbacks), so every recorded opening marker is
-  eventually pushed exactly once.
+  never reaches the span callbacks), and dropped opens unwound via the
+  `c->over` path (`src/markdown.c:244`) are never recorded on `c->sp` — so
+  every *recorded* opening marker is pushed exactly once. **Guard:** the
+  close-time opening push is conditional on `sp[i].start_set` — a span
+  whose resolve loop never ran (textless span, e.g. an empty code span)
+  records no opening marker and must not emit a bogus offset-0 hide.
 - **New gate.** `in_reveal_span(c, ext_start, ext_end)`: reveal (i.e. skip
   the hide) iff `sel_lo <= ext_end && sel_hi >= ext_start` — an inclusive
   overlap test between the reveal window and the span extent, replacing the
@@ -74,11 +78,19 @@ Changes:
 - **New pure query.** `size_t markdown_reveal_sig(const Deco* d, size_t n,
   size_t caret)` — a deterministic signature of the set of inline span
   extents the caret touches (e.g. fold of `aux_start*2654435761u ^ aux_len`
-  over touching extents; 0 when none). Two caret positions produce the same
-  signature iff they touch the same extent set (collisions astronomically
-  unlikely; worst case a missed restyle on a hash collision — cosmetic,
-  self-heals on the next caret move). Pure list walk over the cached
-  hide-all decos; no parse.
+  over touching extents; 0 when none). **It must consider only entries with
+  `kind == DECO_HIDE && aux_len > 0`** — `DECO_LINK` stores a url-*pool*
+  offset in `aux_start` and `DECO_TASK` a mark offset; treating either as a
+  source extent would produce spurious touches. Two caret positions produce
+  the same signature iff they touch the same extent set (collisions
+  astronomically unlikely; worst case a missed restyle on a hash collision —
+  cosmetic, self-heals on the next caret move). Pure list walk over the
+  cached hide-all decos.
+- **One touch predicate.** `in_reveal_span` (builder gate) and
+  `markdown_reveal_sig` (trigger) must share the *identical*
+  boundary-inclusive touch test — same inclusive endpoints, same
+  `close_end` convention — via one small helper, or the trigger and the
+  rebuilt decoration list disagree at edges and the UI flickers.
 
 Deco order note: deferring opening-marker pushes to close time makes the
 `Deco[]` no longer strictly left-to-right. `nw_apply_decos` and the
@@ -92,17 +104,26 @@ moves *within* a paragraph, but only when they matter:
 
 - `NoteTab` gains `size_t last_reveal_sig`.
 - On `EN_SELCHANGE`: compute `markdown_reveal_sig` over the C3a cached
-  decos (`nw_decos` — cache read, no parse) at the new caret. If it differs
+  decos (`nw_decos` — a cache read on caret-only moves; it reparses only
+  when `cache_dirty`, and the handler already calls `nw_decos` via
+  `nw_update_toggles`, so this adds no new parse). If the signature differs
   from `last_reveal_sig` (or the paragraph changed, as today), trigger the
   existing restyle path and store the new signature.
+- **Restyle scope honesty:** the reused caret-move restyle is
+  `nw_restyle(active, 0)` — a **whole-document** re-apply, not
+  paragraph-scoped. That is exactly today's cost per paragraph change; this
+  feature makes it fire per span entry/exit instead. Acceptable at
+  sticky-note sizes (µs parse + one full apply); it also trivially covers
+  re-rendering the span the caret *left*, wherever it was. No new apply
+  scope logic.
 - Arrow-keying through plain text: signature stays 0 → no restyle, same
   cost as today.
-- The restyle must re-apply the paragraph the caret **left** as well as the
-  one it entered — the existing paragraph-transition machinery already
-  re-applies old + new caret paragraphs; entering/leaving a span within one
-  paragraph re-applies that paragraph. No new apply scope logic.
-- Invalidation unchanged: text mutations already dirty the cache (C3a);
-  `last_reveal_sig` is recomputed from fresh decos on the next selchange.
+- **Freshness/ordering:** after a text edit, `EN_CHANGE` sets `cache_dirty`.
+  If an `EN_SELCHANGE` for the same edit arrives first, `reveal_sig` may be
+  computed over pre-edit offsets — bounded and self-healing (the debounce
+  restyle re-renders and the next selchange recomputes from a fresh cache);
+  the spec accepts this rather than asserting freshness. Text mutations
+  otherwise invalidate as in C3a.
 
 ### 3. What does not change
 
@@ -129,6 +150,10 @@ Pure TDD in `tests/test_markdown.c` (the builder + queries are pure logic):
   anywhere on its line, hides from another line).
 - Hide-all sentinel emits every hide with correct `aux_start`/`aux_len`
   extents (cache contract).
+- Textless span (empty code span ``` `` ```) emits no bogus opening hide
+  (the `start_set` guard).
+- `markdown_reveal_sig` ignores `DECO_LINK`/`DECO_TASK` aux fields (doc
+  with a link: caret near-but-outside link syntax yields sig 0).
 - `markdown_reveal_sig`: 0 in plain text; nonzero and stable inside a span;
   changes when crossing a span boundary; equal for two carets inside the
   same span; inner-vs-outer nested positions differ.
@@ -154,8 +179,9 @@ Pure TDD in `tests/test_markdown.c` (the builder + queries are pure logic):
 - **Missed restyle on signature collision:** hash fold makes this
   astronomically rare; consequence is cosmetic (marker stays revealed until
   the next caret move recomputes).
-- **Restyle frequency:** worst case one extra restyle per span
-  entry/exit — bounded, paragraph-scoped, and far below the per-event
+- **Restyle frequency:** worst case one extra whole-document restyle per
+  span entry/exit (see §2 — the caret-move restyle is document-wide, not
+  paragraph-scoped) — bounded by keystroke rate and far below the per-event
   reparse storm C3a removed. The signature check itself is a cache-read
   list walk (µs).
 - **Same-paragraph leave/enter:** both old and new positions lie in
