@@ -92,6 +92,7 @@ typedef struct {
     HWND edit;        /* this tab's body RichEdit */
     int  last_lines;  /* line count at last restyle; a change forces whole-doc */
     size_t last_caret_para;   /* paragraph offset last revealed (per tab) */
+    size_t last_reveal_sig;   /* inline-span reveal signature at last restyle */
     Deco*  cache_decos;   /* cached hide-all decoration list (NULL until built) */
     size_t cache_n;
     char*  cache_pool;    /* url pool backing cached DECO_LINK aux (currently unread; freed each reparse) */
@@ -1002,6 +1003,7 @@ static void nw_remove_tab(NoteWin* nw, HWND hwnd, int i) {
     nw->tab[nw->ntabs - 1].cache_pool  = NULL;
     nw->tab[nw->ntabs - 1].cache_n     = 0;
     nw->tab[nw->ntabs - 1].cache_dirty = 1;
+    nw->tab[nw->ntabs - 1].last_reveal_sig = 0;
     nw->ntabs--;
     if (nw->ntabs == 0) {
         WinMeta* w = nw_win(nw);
@@ -1093,6 +1095,7 @@ static void nw_add_tab(NoteWin* nw, HWND hwnd) {
     int i = nw->ntabs++;
     nw->tab[i].cache_decos = NULL; nw->tab[i].cache_pool = NULL;
     nw->tab[i].cache_n = 0; nw->tab[i].cache_dirty = 1;
+    nw->tab[i].last_reveal_sig = 0;
     snprintf(nw->tab[i].id, sizeof nw->tab[i].id, "%s", m->id);
     nw->tab[i].edit = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
         WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
@@ -1366,6 +1369,7 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         for (int i = 0; i < nw->ntabs; i++) {
             nw->tab[i].cache_decos = NULL; nw->tab[i].cache_pool = NULL;
             nw->tab[i].cache_n = 0; nw->tab[i].cache_dirty = 1;
+            nw->tab[i].last_reveal_sig = 0;
             snprintf(nw->tab[i].id, sizeof nw->tab[i].id, "%s", w->tabs[i]);
             nw->tab[i].edit = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
                 WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL
@@ -1622,8 +1626,17 @@ static LRESULT CALLBACK nw_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     size_t lo = (size_t)sel.cpMin, hi = lo;
                     nw_para_bounds(b, len, &lo, &hi);
                     free(b);
-                    if (lo != nw->tab[nw->active].last_caret_para) {
-                        nw->tab[nw->active].last_caret_para = lo;
+                    /* inline-span reveal: restyle when the set of spans the
+                     * selection touches changes, not only on paragraph change */
+                    size_t dn; const char* dp;
+                    const Deco* dd = nw_decos(nw, nw->active, &dn, &dp);
+                    size_t sig = dd ? markdown_reveal_sig(dd, dn,
+                                          (size_t)sel.cpMin, (size_t)sel.cpMax)
+                                    : 0;
+                    NoteTab* t = &nw->tab[nw->active];
+                    if (lo != t->last_caret_para || sig != t->last_reveal_sig) {
+                        t->last_caret_para = lo;
+                        t->last_reveal_sig = sig;
                         SendMessageW(e, WM_SETREDRAW, FALSE, 0);
                         nw_restyle(nw, nw->active, 0);   /* whole doc: flip reveal */
                         SendMessageW(e, WM_SETREDRAW, TRUE, 0);
