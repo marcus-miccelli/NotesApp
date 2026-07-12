@@ -41,12 +41,22 @@ become pure list walks.
 
 - **`DECO_TASK`** — new `DecoKind`. For each task-list item the builder emits it
   over the `[ ]`/`[x]` checkbox range, reusing existing `Deco` fields:
-  `start` = the `[`, `len` = 3 (`[ ]`), `aux_start` = the mark char offset,
+  `start` = the `[` (= `mark_off - 1`), `len` = 3 (i.e. range `[m-1, m+2)`,
+  mirroring `markdown_task_at`), `aux_start` = the mark char offset,
   `number` = checked (0/1). Emitted at the existing task branch in `d_text`
-  (`src/markdown.c:303-320`, the `if (c->li_is_task)` block).
+  (`src/markdown.c:303-320`, the `if (c->li_is_task)` block) via an
+  **unconditional `push`** (NOT `push_hide` — it must be additive to the existing
+  task hides and never reveal-gated, or `task_at` would fail inside a revealed
+  paragraph). Because it is emitted inside `markdown_decorate` itself,
+  `nw_restyle`'s own parse now also yields `DECO_TASK`; `nw_apply_decos` switches
+  only on `DECO_FMT`/`DECO_HIDE`/`DECO_PARA`/`DECO_LINK`, so an unknown
+  `DECO_TASK` is silently ignored there (no mis-render).
 - **`MdFmt markdown_fmt_from_decos(const Deco* d, size_t n, size_t caret)`** —
-  the current `markdown_fmt_at` walk (OR of `DECO_FMT` covering the caret,
-  headings masked out), lifted to operate on a supplied list.
+  the current `markdown_fmt_at` walk lifted to a supplied list: OR of `DECO_FMT`
+  whose range covers the caret using the **boundary-inclusive test**
+  `(caret>a && caret<=b) || (caret>=a && caret<b)`, then mask out
+  `MD_FMT_H1|H2|H3` (headings are not toggles) — both details carried verbatim
+  from `markdown_fmt_at`.
 - **`int markdown_task_from_decos(const Deco* d, size_t n, size_t off,
   size_t* mark_off, int* checked)`** — scan `DECO_TASK`; if `off` ∈
   `[start, start+len)` set `*mark_off = aux_start`, `*checked = number`,
@@ -73,26 +83,52 @@ Accessor:
  * only when the tab's text changed since the last parse. *n / *pool out. */
 static const Deco* nw_decos(NoteWin* nw, int tab, size_t* n, const char** pool);
 ```
-When `cache_dirty` (or no cache yet): read the body via `nw_body_text`, call
-`markdown_decorate(buf, len, (size_t)-1, 0, &decos, &pool)` (hide-all), free the
-old cache, store the new list + pool, clear `cache_dirty`. Otherwise return the
-stored list untouched. The cache is freed (`cache_decos` + `cache_pool`) wherever
-a tab's edit is destroyed and when the `NoteWin` is freed.
+When `cache_decos == NULL` (no cache yet) **or** `cache_dirty`: read the body via
+`nw_body_text`, call `markdown_decorate(buf, len, (size_t)-1, 0, &decos, &pool)`
+(hide-all), free the old cache, store the new list + pool, clear `cache_dirty`.
+Otherwise return the stored list untouched. (First-parse safety comes from the
+`cache_decos == NULL` branch — see §3; do not rely on a dirty default.)
+
+**Cache lifetime (must be exact — `NoteTab` slots are a reused fixed array).**
+The tab array is shifted in place, so cache pointers must be freed and re-inited
+at the right points or a reopened/shifted slot inherits a stale or dangling
+`cache_decos`:
+
+- **Free** `cache_decos` + `cache_pool` (and null them, `cache_n = 0`) in
+  `nw_close_tab` and `nw_delete_note`, at the point the tab's edit is destroyed,
+  **before** `nw_remove_tab` shifts the array.
+- In `nw_remove_tab`, after the `nw->tab[k] = nw->tab[k+1]` shift, **null the
+  vacated top slot's** cache fields (`cache_decos = NULL; cache_pool = NULL;
+  cache_n = 0; cache_dirty = 1`) so the duplicated pointer left by the struct
+  copy is not double-freed or reused.
+- Explicitly init the cache fields (`cache_decos = NULL; cache_pool = NULL;
+  cache_n = 0; cache_dirty = 1`) for a (re)used slot in `nw_add_tab` and in the
+  `WM_CREATE` per-tab init loop — `nw_add_tab` reuses `i = nw->ntabs++` and would
+  otherwise carry a prior occupant's cache.
+- In `WM_DESTROY`, free every tab's cache in a per-tab loop **before** `free(nw)`
+  — on window close the OS auto-destroys the child edits without routing through
+  `nw_close_tab`, so the close-path free does not fire on window teardown.
 
 ### 3. Invalidation
 
 Set `cache_dirty = 1` for the affected tab on **every** text mutation — an
 enumerable set, so the accessor always reparses before returning stale offsets:
 
-- `EN_CHANGE` handler (user typing / paste) → active tab dirty.
+- `EN_CHANGE` handler (user typing / paste / cut / undo — all fire `EN_CHANGE`
+  via the `ENM_CHANGE` mask) → active tab dirty.
 - `nw_reformat_now` (the tail of every programmatic mutation: format shortcuts
   `nw_wrap_inline`/`nw_list_prefix`/`nw_handle_enter`, and `nw_toggle_task`) →
-  active tab dirty.
-- `nw_load_tab` (sets a tab's content) → that tab dirty.
+  active tab dirty. **Set the dirty flag at the TOP of `nw_reformat_now`**, before
+  its own `nw_update_toggles` call — otherwise that post-edit toggle read serves
+  stale offsets from the pre-edit cache.
+- `nw_load_tab` (sets a tab's content via `SetWindowTextA`) → that tab dirty.
 
-A missed dirty-set would serve stale offsets, so the set is kept small and
-explicit; correctness is guarded by the existing suite (behavior-preserving
-refactor) plus the fact that dirty defaults to 1 for a fresh (calloc'd) tab.
+`nw_restyle` changes only char/paragraph *formatting* (no text-length change),
+so it correctly does not invalidate. A missed dirty-set would serve stale
+offsets, so the set is kept small and explicit; correctness is guarded by the
+existing suite (behavior-preserving refactor). Note a fresh `calloc`'d tab has
+`cache_dirty == 0`, so **first-parse safety rests on the `cache_decos == NULL`
+branch of `nw_decos`, not on a dirty default** (§2).
 
 ### 4. Rewire the hot queries
 
@@ -138,12 +174,20 @@ C3a.
 ## Risks
 
 - **Stale cache from a missed dirty-set:** the invalidation set must cover every
-  text mutation. Mitigations: the set is small/enumerable (§3); `cache_dirty`
-  defaults to 1 for a fresh tab; the query helpers tolerate an out-of-range
-  offset (return 0 / no fmt) rather than reading past the list.
-- **Cache lifetime:** `cache_decos`/`cache_pool` must be freed on tab close and
-  `NoteWin` destroy, matching the existing `Deco*`/pool free discipline in
-  `nw_restyle`; a missed free leaks per reparse.
+  text mutation. Mitigations: the set is small/enumerable (§3); a fresh tab
+  parses via the `cache_decos == NULL` branch (not a dirty default — `calloc`
+  zeroes `cache_dirty` to 0); the query helpers tolerate an out-of-range offset
+  (return 0 / no fmt) rather than reading past the list.
+- **Cache lifetime across tab-slot reuse (highest risk):** `NoteTab` is a reused
+  fixed array; the free/null/init points in §2 must all be present or a shifted
+  or reopened slot inherits a stale/dangling `cache_decos` (wrong offsets or
+  double-free). `WM_DESTROY` must free every tab's cache in a loop — child edits
+  are OS-destroyed on window close without passing through `nw_close_tab`.
+- **`cache_pool` is unused by C3a readers** (`markdown_{fmt,task}_from_decos`
+  ignore link `aux`/pool; the only pool consumer, `nw_apply_decos`'s link table,
+  runs off `nw_restyle`'s own parse). It must still be **freed** with each
+  reparse (the `Deco*`/pool ownership contract from `nw_restyle`); retaining it
+  across calls is harmless and pre-wires C3b, but it is not load-bearing here.
 - **`nw_tab_of_edit` on a stale HWND:** the subclass only runs for a live edit,
   so the lookup always finds the tab; if it ever returns -1 the handler falls
   through to default (no toggle / I-beam), which is safe.
