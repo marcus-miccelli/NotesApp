@@ -56,3 +56,6 @@ dkms.conf
 
 # Installer output
 dist/
+
+# Claude Code session worktrees
+.claude/worktrees/
