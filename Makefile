@@ -1,5 +1,9 @@
 CC      := gcc
 WINDRES := windres
+VERSION := 1.0.0
+# Capture LOCALAPPDATA from Windows environment and export it for recipes
+LOCALAPPDATA := $(shell cmd /c echo %LOCALAPPDATA% 2>/dev/null)
+export LOCALAPPDATA
 # -MMD -MP emit per-object .d files so edits to a header recompile every .c
 # that includes it (without this, e.g. growing a struct in a shared header
 # silently mismatches sizeof across translation units).
@@ -13,6 +17,7 @@ LDLIBS  := -lgdi32 -lcomctl32 -lole32 -lshell32 -ldwmapi -ld2d1 -ldwrite
 BUILD_TMP   := .build-tmp
 export TMP  := $(BUILD_TMP)
 export TEMP := $(BUILD_TMP)
+export LOCALAPPDATA
 $(shell mkdir -p $(BUILD_TMP))
 
 # GUI app sources (added to as tasks land)
@@ -25,7 +30,7 @@ LOGIC_SRC := src/paths.c src/store.c src/prefs.c third_party/cjson/cJSON.c src/m
 TEST_SRC  := tests/runner.c tests/test_smoke.c tests/test_paths.c tests/test_store.c tests/test_prefs.c tests/test_markdown.c tests/test_app.c
 TEST_OBJ  := $(TEST_SRC:.c=.o) $(LOGIC_SRC:.c=.o)
 
-.PHONY: all app test clean
+.PHONY: all app test clean installer
 all: app
 
 LOGIC_OBJ := $(LOGIC_SRC:.c=.o)
@@ -49,6 +54,23 @@ tests.exe: $(TEST_OBJ)
 
 DEPS := $(APP_OBJ:.o=.d) $(TEST_OBJ:.o=.d)
 -include $(DEPS)
+
+# Installer (Inno Setup 6). Recipes run under MSYS2 bash, so fallback paths
+# are POSIX-style and quoted. Checked in order: PATH, the winget per-user
+# location (%LOCALAPPDATA%\Programs — cygpath converts it), then the classic
+# machine-wide "Program Files (x86)" location.
+installer: quicknote.exe
+	@ISCC="$$(command -v ISCC || true)"; \
+	LOCAL="$$(cygpath -u "$$LOCALAPPDATA" 2>/dev/null)"; \
+	for p in "$$LOCAL/Programs/Inno Setup 6/ISCC.exe" \
+	         "/c/Program Files (x86)/Inno Setup 6/ISCC.exe"; do \
+	  if [ -z "$$ISCC" ] && [ -x "$$p" ]; then ISCC="$$p"; fi; \
+	done; \
+	if [ -z "$$ISCC" ]; then \
+	  echo "error: ISCC.exe not found — install Inno Setup 6: winget install JRSoftware.InnoSetup"; \
+	  exit 1; \
+	fi; \
+	"$$ISCC" /DAppVersion="$(VERSION)" installer/quicknote.iss
 
 clean:
 	rm -f quicknote.exe stickynotes.exe tests.exe $(APP_OBJ) $(TEST_OBJ) $(RES_OBJ) $(DEPS)
